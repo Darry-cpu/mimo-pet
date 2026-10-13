@@ -4,7 +4,7 @@
 
 ## 下载（推荐）
 
-**[📥 下载安装包 MimoPet-Setup-1.0.1.exe](https://github.com/Darry-cpu/mimo-pet/releases/latest)**
+**[📥 下载安装包 MimoPet-Setup-1.0.2.exe](https://github.com/Darry-cpu/mimo-pet/releases/latest)**
 
 双击即可安装，**无需管理员权限、无需安装 Python**。全部版本见 [Releases](https://github.com/Darry-cpu/mimo-pet/releases)。
 
@@ -118,13 +118,15 @@ iscc mimo_setup.iss
 ### `skill/` 目录（对官方技能的补充）
 
 官方 [openai/skills](https://github.com/openai/skills) 的 `hatch-pet` 技能没有针对 **Windows + 没有 bash/jq** 的环境，
-所以补了三个脚本：
+所以补了下面这些脚本：
 
 | 脚本 | 作用 |
 |---|---|
 | `mark_job_complete.py` | 记录某个生成任务完成（替代 `jq` 更新 manifest） |
 | `package_pet.py` | 打包 Codex `pet.json` 与 MiMo `manifest.json` 两套格式（替代 shell+jq） |
 | `defringe_atlas.py` | **反解去蓝边**：色键抠图后半透明边缘残留青色，这个脚本把它们颜色反解干净 |
+| `soften_ground_shadow.py` | 生成图自带一圈**青蓝色的脚底阴影**，跑动时脚下一团蓝；此脚本把它换成柔和的灰影（不碰角色本身） |
+| `make_previews.py` | 从图集重新生成 `previews/` 里的动图与联系表——改了图集后跑一次，预览就和成品一致 |
 
 详细改动见 `skill/SKILL-CHANGES.md`。
 
