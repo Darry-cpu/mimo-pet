@@ -22,6 +22,7 @@ import math
 import os
 import random
 import sys
+import threading
 import time
 from ctypes import wintypes
 from pathlib import Path
@@ -66,6 +67,9 @@ FPS = 60
 # slowed run cycle so her feet do not slide on the ground
 STROLL_FACTOR = 1.6         # animation slowdown for standing actions & strolling
 DASH_FACTOR = 1.0           # animation speed while crossing the screen
+WAIT_FACTOR = 2.4           # 玩手机再放慢一档，刷手机本来就该慢悠悠
+WAIT_HOLD_MIN = 2.2         # 每播完一轮玩手机，停在原地“看屏幕”一会儿
+WAIT_HOLD_MAX = 4.8         # （像认真看内容，而不是无限鬼畜循环）
 STROLL_SPEED = 78.0         # px per second while strolling (matches the run cycle)
 DASH_SPEED = 200.0          # px per second while crossing the screen
 REST_SECONDS = 30.0         # how long she stays on 玩手机 / 干活中 between trips
@@ -113,6 +117,7 @@ except Exception:
 u32 = ctypes.windll.user32
 g32 = ctypes.windll.gdi32
 k32 = ctypes.windll.kernel32
+MF_ZOOM_OFF = 0x3            # MF_GRAYED | MF_DISABLED
 
 u32.GetDC.restype = wintypes.HDC
 u32.ReleaseDC.argtypes = (wintypes.HWND, wintypes.HDC)
@@ -237,11 +242,14 @@ class Pet:
         if not SHEET.is_file():
             raise SystemExit(f"missing spritesheet: {SHEET}")
         self.scale = scale
-        self.frames: dict[str, list[bytes]] = {}
-        self.durations: dict[str, list[int]] = {}
         self.w = int(CELL_W * scale)
         self.h = int(CELL_H * scale)
-        self._load()
+        # frames per zoom level, built with Pillow (GDI StretchBlt destroys the
+        # alpha channel of a 32bpp DIB, so it must not be used to zoom)
+        self._scale_frames: dict[float, dict[str, list[bytes]]] = {}
+        self.frames = self._frames_at(scale)
+        self.durations: dict[str, list[int]] = {
+            n: list(d) for n, (_r, _c, d) in STATES.items()}
 
         self.x = 300.0
         self.y = float(self._default_y())
@@ -272,22 +280,39 @@ class Pet:
         self._create_window()
 
     # ------------------------------------------------------------ content
-    def _load(self) -> None:
+    def _build_frames(self, scale: float) -> dict[str, list[bytes]]:
+        """Render every frame at one zoom level (Pillow keeps alpha intact)."""
         sheet = Image.open(SHEET).convert("RGBA")
         expected = (8 * CELL_W, 9 * CELL_H)
         if sheet.size != expected:
             logging.warning("unexpected atlas size %s (expected %s)", sheet.size, expected)
-        for name, (row, count, durs) in STATES.items():
+        size = (int(CELL_W * scale), int(CELL_H * scale))
+        out: dict[str, list[bytes]] = {}
+        for name, (row, count, _durs) in STATES.items():
             frames = []
             for c in range(count):
                 cell = sheet.crop((c * CELL_W, row * CELL_H, (c + 1) * CELL_W, (row + 1) * CELL_H))
-                if self.scale != 1.0:
-                    cell = cell.resize((int(CELL_W * self.scale), int(CELL_H * self.scale)),
-                                       Image.LANCZOS)
+                if scale != 1.0:
+                    cell = cell.resize(size, Image.LANCZOS)
                 frames.append(premultiplied_bgra(cell))
-            self.frames[name] = frames
-            self.durations[name] = list(durs)
-        logging.info("loaded %d states, cell %dx%d", len(self.frames), self.w, self.h)
+            out[name] = frames
+        return out
+    def _frames_at(self, scale: float) -> dict[str, list[bytes]]:
+        """Frames for a zoom level, rendered once and then served from memory."""
+        got = self._scale_frames.get(scale)
+        if got is None:
+            got = self._build_frames(scale)
+            self._scale_frames[scale] = got
+        return got
+    def _preload_scales(self) -> None:
+        """Warm the other zoom levels up front so 放大/缩小 never stalls."""
+        for s in (1.25, 1.5, 0.75):          # likeliest first
+            if s not in self._scale_frames:
+                try:
+                    self._frames_at(s)
+                except Exception:
+                    logging.warning("preload scale %.2f failed", s, exc_info=True)
+        logging.info("zoom levels ready: %s", sorted(self._scale_frames))
 
     # ------------------------------------------------------------ helpers
     def _work_area(self) -> tuple[int, int, int, int]:
@@ -303,6 +328,7 @@ class Pet:
         screen_dc = u32.GetDC(None)
         self.mem_dc = g32.CreateCompatibleDC(screen_dc)
         u32.ReleaseDC(None, screen_dc)
+        # one DIB, already at the on-screen (possibly zoomed) size
         bi = BITMAPINFO()
         bi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
         bi.bmiHeader.biWidth = self.w
@@ -315,7 +341,7 @@ class Pet:
         if not self.dib or not bits.value:
             raise SystemExit(f"CreateDIBSection failed err={ctypes.get_last_error()}")
         self.bits = bits.value
-        g32.SelectObject(self.mem_dc, self.dib)
+        self._mem_old = g32.SelectObject(self.mem_dc, self.dib)
 
     # ------------------------------------------------------------ window
     def _create_window(self) -> None:
@@ -460,8 +486,9 @@ class Pet:
         u32.AppendMenuW(menu, 0, 6, "抚摸")
         u32.AppendMenuW(menu, 0x800, 0, None)
         u32.AppendMenuW(menu, 0, 1, "继续" if self.paused else "暂停")
-        u32.AppendMenuW(menu, 0, 2, "放大")
-        u32.AppendMenuW(menu, 0, 3, "缩小")
+        si = SCALES.index(self.scale) if self.scale in SCALES else 1
+        u32.AppendMenuW(menu, 0 if si < len(SCALES) - 1 else MF_ZOOM_OFF, 2, "放大")
+        u32.AppendMenuW(menu, 0 if si > 0 else MF_ZOOM_OFF, 3, "缩小")
         u32.AppendMenuW(menu, 0x800, 0, None)
         u32.AppendMenuW(menu, 0, 4, "退出")
         pt = POINT()
@@ -487,17 +514,22 @@ class Pet:
             self.stroke()
 
     def _rescale(self, scale: float) -> None:
+        if scale == self.scale:
+            return
         cx, cy = self.x + self.w / 2, self.y + self.h
         self.scale = scale
         self.w, self.h = int(CELL_W * scale), int(CELL_H * scale)
-        self._load()
-        g32.DeleteObject(self.dib)
-        g32.DeleteDC(self.mem_dc)
+        self.frames = self._frames_at(scale)          # cached: no re-render
+        old_dc, old_dib, old_sel = self.mem_dc, self.dib, self._mem_old
         self._make_dib()
+        g32.SelectObject(old_dc, old_sel)
+        g32.DeleteObject(old_dib)
+        g32.DeleteDC(old_dc)
         self.x, self.y = cx - self.w / 2, cy - self.h
         u32.SetWindowPos(self.hwnd, HWND_TOPMOST, int(self.x), int(self.y),
                          self.w, self.h, SWP_NOACTIVATE)
         self.frame_i = 0
+        logging.info("rescale -> %.2f (%dx%d)", scale, self.w, self.h)
 
     def _move_window(self) -> None:
         u32.SetWindowPos(self.hwnd, HWND_TOPMOST, int(round(self.x)), int(round(self.y)),
@@ -620,9 +652,14 @@ class Pet:
 
         # animation timing, slowed by anim_factor so the motion reads naturally
         durs = self.durations[self.mode]
-        if now - self.frame_at >= durs[self.frame_i] * self.anim_factor / 1000.0:
+        factor = WAIT_FACTOR if self.mode == "waiting" else self.anim_factor
+        if now - self.frame_at >= durs[self.frame_i] * factor / 1000.0:
+            loop_done = self.frame_i == len(durs) - 1
             self.frame_i = (self.frame_i + 1) % len(durs)
             self.frame_at = now
+            if self.mode == "waiting" and loop_done:
+                # one pass of 刷手机 is done: stay on the first pose a while
+                self.frame_at = now + random.uniform(WAIT_HOLD_MIN, WAIT_HOLD_MAX)
 
         if self.phase == "travel" and self.walking and self.target_x is not None:
             dx = self.target_x - self.x
@@ -647,6 +684,8 @@ class Pet:
         self._blit(frames[self.frame_i % len(frames)])
 
     def run(self) -> None:
+        # render the other zoom levels in the background right away
+        threading.Thread(target=self._preload_scales, daemon=True).start()
         msg = MSG()
         last = time.perf_counter()
         logging.info("message loop start")
