@@ -2,6 +2,12 @@
 
 一只会自己在 Windows 桌面上走动的小宠物，附带一整套生成 **Codex / ChatGPT 桌宠** 动画的工具。
 
+## 下载（推荐）
+
+**[📥 下载安装包 MimoPet-Setup-1.0.0.exe](https://github.com/Darry-cpu/mimo-pet/releases/latest)**
+
+双击即可安装，**无需管理员权限、无需安装 Python**。全部版本见 [Releases](https://github.com/Darry-cpu/mimo-pet/releases)。
+
 这个仓库包含两部分成果：
 
 | 目录 | 内容 |
