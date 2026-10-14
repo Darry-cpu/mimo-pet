@@ -89,6 +89,11 @@ AIR_DRAG = 0.55             # 每秒空气阻力，v *= AIR_DRAG ** dt
 SETTLE_SPEED = 45.0         # px/s - 慢于此且在地上＝停稳，回归日常
 FLY_RUN_SPEED = 140.0       # px/s - 飞行中横向快于此值就放跑步动画
 
+# 拖拽时挤进屏幕边框 -> 朝屏幕内弹一下（一次冲量 + 弹簧衰减，肉眼能看到 1~2 次回弹）
+KNOCK_KICK = 9.0            # 每"挤进边框 1px"给出的初速度 (px/s)
+KNOCK_STIFF = 240.0         # 回弹弹簧（刚度 -> 一个来回约 0.41 秒）
+KNOCK_DAMP = 7.0            # 阻尼（欠阻尼，能看到弹两次再停下）
+
 # 置顶看门狗：WS_EX_TOPMOST 只是"样式位"，窗口被别的窗口扰动后可能仍带位却沉到下面，
 # 必须偶尔真调一次 SetWindowPos(HWND_TOPMOST) 才能回到置顶带（dsh-pet 踩过这个坑）
 TOPMOST_TICK = 1.0          # s - 多久检查一次
@@ -440,6 +445,12 @@ class Pet:
         self.vx = 0.0
         self.vy = 0.0
         self.flying = False
+        # --- border knock-back while dragging ---
+        self.knock = [0.0, 0.0]            # 视觉偏移（画面上朝屏幕内的位移）
+        self.knock_vel = [0.0, 0.0]
+        self.knock_at = [0.0, 0.0]         # 每面墙各自的触发时刻（做冷却）
+        self.wall_push = [0.0, 0.0]        # 上次触发时挤进墙的深度（再深 30px 才补一次）
+        self.on_wall = [False, False]      # 是否正贴着某面墙（用于只在"撞上瞬间"记日志）
         # --- topmost watchdog ---
         self._topmost_checked_at = 0.0
         self._topmost_asserted_at = time.perf_counter()
@@ -632,8 +643,16 @@ class Pet:
                         self.set_mode("idle")
                         self.phase = "pause"
                         self.phase_until = time.perf_counter() + random.uniform(1.0, 2.5)
+                        left, top, right, bottom = self._work_area()
+                        inside = (left <= self.x <= right - self.w) and (top <= self.y <= bottom - self.h)
                         vx, vy = self._release_velocity()
                         speed = math.hypot(vx, vy)
+                        if not inside:
+                            # 真被放到了屏幕外（多显示器变化等情况）：给个朝屏内的初速度弹回来
+                            vx = (left - self.x if self.x < left else (right - self.w) - self.x) or 260.0
+                            vy = -180.0
+                            speed = max(speed, THROW_MIN_SPEED)
+                            logging.info("released outside the work area -> bounce back in")
                         if speed >= THROW_MIN_SPEED:
                             clamp = lambda v: max(-MAX_THROW_SPEED, min(MAX_THROW_SPEED, v))
                             self.vx, self.vy = clamp(vx), clamp(vy)
@@ -782,13 +801,19 @@ class Pet:
         self.frame_i = 0
         logging.info("rescale -> %.2f (rel %.2f, %dx%d)", scale, rel, self.w, self.h)
 
+    def _draw_xy(self) -> tuple[float, float]:
+        """Where she is drawn: physical position plus the knock-back offset."""
+        return self.x + self.knock[0], self.y + self.knock[1]
+
     def _move_window(self) -> None:
-        u32.SetWindowPos(self.hwnd, HWND_TOPMOST, int(round(self.x)), int(round(self.y)),
+        dx, dy = self._draw_xy()
+        u32.SetWindowPos(self.hwnd, HWND_TOPMOST, int(round(dx)), int(round(dy)),
                          self.w, self.h, SWP_NOACTIVATE)
 
     def _blit(self, frame: bytes) -> None:
         ctypes.memmove(self.bits, frame, len(frame))
-        pt_dst, size, pt_src = POINT(int(round(self.x)), int(round(self.y))), SIZE(self.w, self.h), POINT(0, 0)
+        dx, dy = self._draw_xy()
+        pt_dst, size, pt_src = POINT(int(round(dx)), int(round(dy))), SIZE(self.w, self.h), POINT(0, 0)
         u32.UpdateLayeredWindow(self.hwnd, None, ctypes.byref(pt_dst), ctypes.byref(size),
                                 self.mem_dc, ctypes.byref(pt_src), 0,
                                 ctypes.byref(self.blend), ULW_ALPHA)
@@ -810,14 +835,76 @@ class Pet:
         dt = max(t1 - t0, 1e-3)
         return (x1 - x0) / dt, (y1 - y0) / dt
 
+    def _clamp_inside(self, x: float, y: float) -> tuple[float, float]:
+        """Keep the whole pet inside the work area (it can no longer be dragged off-screen)."""
+        left, top, right, bottom = self._work_area()
+        return min(max(x, float(left)), float(right - self.w)), min(max(y, float(top)), float(bottom - self.h))
+
+    def _hit_border(self, axis: int, overshoot: float, now: float) -> None:
+        """Kick away from the wall the cursor is being pressed into.
+
+        ``overshoot`` is how far past the wall the cursor wants to go, signed, so
+        negating it always points back towards the screen: past the right/bottom wall
+        it kicks left/up, past the left/top wall it kicks right/down.
+
+        Fired once per contact (plus one more if she is pushed 30px deeper afterwards),
+        so holding her against the edge settles instead of jittering in place.
+        """
+        if now - self.knock_at[axis] < 0.18:
+            return
+        self.knock_at[axis] = now
+        self.knock_vel[axis] = -max(min(overshoot, 40.0), -40.0) * KNOCK_KICK
+
+    def _step_knock(self, dt: float) -> None:
+        """Run the knock-back spring and clear it once it has settled."""
+        for axis in (0, 1):
+            if self.knock[axis] == 0.0 and self.knock_vel[axis] == 0.0:
+                continue
+            accel = -KNOCK_STIFF * self.knock[axis] - KNOCK_DAMP * self.knock_vel[axis]
+            self.knock_vel[axis] += accel * dt
+            self.knock[axis] += self.knock_vel[axis] * dt
+            if abs(self.knock[axis]) < 0.3 and abs(self.knock_vel[axis]) < 8.0:
+                self.knock[axis] = 0.0
+                self.knock_vel[axis] = 0.0
+
     def _follow_cursor(self, dt: float, now: float) -> None:
-        """Over-damped spring towards the cursor: catches up without jitter or overshoot."""
+        """Over-damped spring towards the cursor: catches up without jitter or overshoot.
+
+        The spring aims at the cursor but the position is clamped to the work area, so
+        the pet can be pushed right up to an edge and never past it; squeezing into an
+        edge charges a knock-back that bounces it back towards the screen.
+        """
         if self.drag_target is None:
             return
         tx, ty = self.drag_target
         k = 1.0 - math.exp(-dt / DRAG_FOLLOW_TAU)
-        self.x += (tx - self.x) * k
-        self.y += (ty - self.y) * k
+        raw_x = self.x + (tx - self.x) * k
+        raw_y = self.y + (ty - self.y) * k
+        left, top, right, bottom = self._work_area()
+        max_x, max_y = float(right - self.w), float(bottom - self.h)
+        # signed overshoot per axis: positive = past the right/bottom wall
+        over = [0.0, 0.0]
+        if raw_x < left:
+            over[0] = raw_x - left
+        elif raw_x > max_x:
+            over[0] = raw_x - max_x
+        if raw_y < top:
+            over[1] = raw_y - top
+        elif raw_y > max_y:
+            over[1] = raw_y - max_y
+        hit = (over[0] != 0.0, over[1] != 0.0)
+        for axis, name in ((0, "horizontal"), (1, "vertical")):
+            if hit[axis] and not self.on_wall[axis]:
+                logging.info("pushed against the %s border", name)
+            if hit[axis]:
+                # first contact, or pushed 30px deeper: kick again
+                if (not self.on_wall[axis] or abs(over[axis]) > self.wall_push[axis] + 30.0):
+                    self._hit_border(axis, over[axis], now)
+                    self.wall_push[axis] = abs(over[axis])
+            else:
+                self.wall_push[axis] = 0.0
+        self.on_wall[0], self.on_wall[1] = hit
+        self.x, self.y = min(max(raw_x, left), max_x), min(max(raw_y, top), max_y)
         self._track_drag(now)
         self._move_window()
 
@@ -960,6 +1047,7 @@ class Pet:
     def step(self, dt: float) -> None:
         now = time.perf_counter()
         self._watch_topmost(now)
+        self._step_knock(dt)
 
         # a lone click only counts once we are sure no double click followed: 单击 -> 投喂
         if self.pending_click is not None and now - self.pending_click > CLICK_DELAY:
