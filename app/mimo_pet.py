@@ -21,6 +21,7 @@ import logging
 import math
 import os
 import random
+import shutil
 import sys
 import threading
 import time
@@ -140,6 +141,39 @@ except Exception:
         ctypes.windll.user32.SetProcessDPIAware()
     except Exception:
         pass
+
+def _clean_stale_runtime_dirs() -> None:
+    """Delete _MEIxxxx leftovers from earlier runs of this app.
+
+    A one-file build unpacks itself into the temp folder on every launch and only
+    removes that folder on a clean exit, so every hard kill or update leaves ~56MB
+    behind. Ours are told apart by the data files they carry (the atlas and the icon),
+    so no other program's folder is ever touched, and the folder we are running from
+    is skipped.
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    root = os.environ.get("TEMP")
+    here = getattr(sys, "_MEIPASS", "")
+    if not root or not here:
+        return
+    here = Path(here)
+    removed = 0
+    for cand in Path(root).glob("_MEI*"):
+        try:
+            if not cand.is_dir() or cand.samefile(here):
+                continue
+            if not ((cand / "spritesheet.webp").is_file() and (cand / "mimo.ico").is_file()):
+                continue
+        except OSError:
+            continue
+        shutil.rmtree(cand, ignore_errors=True)
+        if not cand.exists():
+            removed += 1
+            logging.info("removed leftover runtime dir %s", cand.name)
+    if removed:
+        logging.info("cleaned %d leftover runtime dir(s)", removed)
+
 
 def _display_scale() -> float:
     """Primary display DPI factor: 1.0 = 100%, 1.5 = 150%.
@@ -1031,6 +1065,7 @@ if __name__ == "__main__":
         if u32.FindWindowW("MimoPetWindow", "MimoPet"):
             logging.info("another MimoPet instance is already running; exiting")
             raise SystemExit(0)
+        _clean_stale_runtime_dirs()
         Pet().run()
     except SystemExit:
         pass
