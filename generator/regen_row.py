@@ -10,6 +10,7 @@ usage:  python regen_row.py <state>
 
 from __future__ import annotations
 
+import os
 import base64
 import json
 import re
@@ -35,7 +36,14 @@ IDENTITY = """chibi anime girl, WHITE hair with a small orange curl (ahoge) on t
 COMMON = """Background: a perfectly flat uniform pure cyan #00FFFF filling the whole canvas, including behind the layout guide slots.
 Keep identical in EVERY frame: the same body position, the same scale, the same ground line, the same white hair and orange curl, the same big orange eyes, the same jacket with its small orange 'mi' logo, the same skirt and sneakers, and the SAME HEADPHONES - the headphone must look exactly the same in all frames, never missing, never a different shape, size or side.
 Absolutely no ground shadow, no contact shadow, no ground line, no ellipse or mark under the feet. No scenery, no text, no speed lines, no dust, no glow, no detached effects; keep cyan out of the character.
-Style: clean cel-shaded chibi anime mascot, crisp outlines, flat bright colors."""
+Style: clean cel-shaded chibi anime mascot, crisp outlines, flat bright colors.
+
+SIZE AND STYLE LOCK - she must be the SAME SIZE AND SHAPE as the reference character in every frame:
+- Her body height is about 95% of the slot height: the tip of her ahoge sits near the top edge and the soles of her shoes sit on the bottom edge of the slot, exactly like the reference.
+- The SAME head size, the SAME body width, the SAME arm and leg thickness, the SAME face proportions and the SAME flat cel shading with the same thin dark outline as the reference.
+- She is NEVER drawn smaller, slimmer, younger, glossier, shinier or more detailed than the reference. Do not add strands of hair, extra fingers, extra shading gradients or highlights that the reference does not have.
+- The same jacket with its orange trim (NOT a hoodie and never with a hood raised), the same black pleated skirt, the same white sneakers.
+- Only the pose, the facial expression and the height of her feet change between frames."""
 
 # state -> (grid cols, grid rows, frame count, frame list, prop rules)
 ROWS = {
@@ -60,6 +68,29 @@ ROWS = {
 5. chewing happily, a small closed-eye smile
 6. identical to frame 1 so the loop closes cleanly""",
         """THE BOWL AND SPOON MUST BE PRESENT AND IDENTICAL IN EVERY SINGLE FRAME: the same small bowl, the same small spoon, the same size, the same colours, held in the same two hands. Neither the bowl nor the spoon may ever disappear, shrink, change colour, swap hands, or float. Both props stay close to her body and never touch the slot edges."""
+    ),
+    "jumping": (
+        3, 2, 6,
+        """This is her EXCITED JUMP: ONE single hop - crouch, launch, airborne, come down, land.
+1. CROUCH: both knees bent deeply with her hips dropped low, torso leaning slightly forward, both arms swung back behind her hips, looking up eagerly with her mouth slightly open.
+2. LAUNCH: both legs extended straight with her heels lifted as she stands on her toes, her body stretched as tall as she can, both arms thrown straight up above her head, big happy open-mouth smile.
+3. APEX: she is AIRBORNE - both knees pulled up towards her chest and both feet lifted clearly off the ground with empty cyan below her shoes, both arms up and out to the sides, her long hair and ahoge flying upward, mouth wide open in a joyful shout.
+4. DESCENT: still airborne but lower than frame 3, both legs reaching straight down with her toes pointed, both arms coming down towards her sides, eyes open with a determined closed mouth.
+5. LAND: both feet flat on the ground, knees bent deeply to absorb the landing with her hips dropped low, both arms out to the sides for balance, eyes open with a small satisfied closed-mouth smile.
+6. identical to frame 1 so the loop closes cleanly""",
+        """CHIBI PROPORTIONS LOCK - she must have EXACTLY the reference's proportions: a HUGE chibi head (about as wide as her shoulders and roughly 45% of her total height), a SHORT torso, SHORT and THICK arms and legs, big shoes, mitten-like hands. Never draw her taller, slimmer, longer-limbed, smaller-headed or more realistic than the reference.
+
+DETAIL LOCK - all of these must be IDENTICAL in every one of the six frames and must never flicker between frames:
+- the big white headphones: ONE white earcup with a smiling black face, always on the SAME side of her head (the side facing the viewer) and at the same height in all six frames - the earcup must NEVER disappear, never move to the other side, never change shape, size or colour;
+- the same orange antenna and headband arcing up over her head, and the same orange 'mi' logo hairclip, in the same place every frame;
+- the same face and the same eyes in the same style (big flat orange eyes, same size and position on the head), the same flat cel shading and the same thin dark outline;
+- the same white-and-orange jacket with its orange trim (never a hoodie, never with the hood raised), the same black pleated skirt with orange trim, the same white sneakers with orange soles.
+
+SIZE LOCK: her body is exactly the same size in all six frames. In the two standing frames she fills about 95% of the slot height, with the soles of her shoes on the bottom edge of the slot and the tip of her ahoge near the top edge. She jumps by tucking her legs and stretching, so she never leaves the slot.
+
+THE HOP MUST READ AS A JUMP: her soles sit low on the ground line in frames 1, 2, 5 and 6 and clearly ABOVE it in frames 3 and 4, with an obviously empty cyan gap under her shoes in frame 3 and a smaller gap in frame 4.
+
+Both hands are empty in every frame - no props at all. No motion lines, no dust, no sparkles, no impact marks, no ground shadow, no ground line and no ellipse of any kind under her feet."""
     ),
     "failed": (
         4, 2, 8,

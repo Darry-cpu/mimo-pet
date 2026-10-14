@@ -12,6 +12,7 @@ Layout: 4 columns x 2 rows of equal slots, each slot with the same aspect ratio 
 
 from __future__ import annotations
 
+import os
 import base64
 import json
 import re

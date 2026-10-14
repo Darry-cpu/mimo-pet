@@ -24,6 +24,7 @@ gets two adjacent frames so it reads as motion rather than a frozen pose.
 
 from __future__ import annotations
 
+import os
 import base64
 import json
 import re

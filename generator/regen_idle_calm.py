@@ -16,6 +16,7 @@ Frames (the app plays row 0, columns 0-5, in this order):
 
 from __future__ import annotations
 
+import os
 import base64
 import json
 import re

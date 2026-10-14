@@ -4,7 +4,7 @@
 
 ## 下载（推荐）
 
-**[📥 下载安装包 MimoPet-Setup-1.0.4.exe](https://github.com/Darry-cpu/mimo-pet/releases/latest)**
+**[📥 下载安装包 MimoPet-Setup-1.0.5.exe](https://github.com/Darry-cpu/mimo-pet/releases/latest)**
 
 双击即可安装，**无需管理员权限、无需安装 Python**。全部版本见 [Releases](https://github.com/Darry-cpu/mimo-pet/releases)。
 
