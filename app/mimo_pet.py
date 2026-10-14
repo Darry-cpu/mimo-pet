@@ -76,6 +76,34 @@ REST_SECONDS = 30.0         # how long she stays on 玩手机 / 干活中 betwee
 TRAVEL_MIN = 220.0          # px - shortest stroll between rests
 TRAVEL_MAX = 620.0          # px - longest stroll (does not need to cross the screen)
 
+# 拖拽甩抛：跟手用"过阻尼弹簧"（跟得上、不抖、不过冲），松手快了就沿抛物线飞出去
+DRAG_FOLLOW_TAU = 0.05      # s - 弹簧跟手的时间常数，越小越紧跟
+THROW_MIN_SPEED = 320.0     # px/s - 松手速度低于此值＝轻轻放下，不起飞
+MAX_THROW_SPEED = 3500.0    # px/s - 甩速上限，防止飞出天际
+GRAVITY = 2400.0            # px/s^2
+BOUNCE_WALL = 0.55          # 撞左右/上边界后保留的速度比例
+BOUNCE_GROUND = 0.34        # 落地保留的速度比例（越大弹得越欢）
+GROUND_FRICTION = 0.80      # 每次触地水平速度保留比例（摩擦力）
+AIR_DRAG = 0.55             # 每秒空气阻力，v *= AIR_DRAG ** dt
+SETTLE_SPEED = 45.0         # px/s - 慢于此且在地上＝停稳，回归日常
+FLY_RUN_SPEED = 140.0       # px/s - 飞行中横向快于此值就放跑步动画
+
+# 置顶看门狗：WS_EX_TOPMOST 只是"样式位"，窗口被别的窗口扰动后可能仍带位却沉到下面，
+# 必须偶尔真调一次 SetWindowPos(HWND_TOPMOST) 才能回到置顶带（dsh-pet 踩过这个坑）
+TOPMOST_TICK = 1.0          # s - 多久检查一次
+TOPMOST_REASSERT = 5.0      # s - 最快多久真重设一次（低频，不打扰别人）
+
+BODY_ALPHA_MIN = 32         # alpha 高于此值才算"身体"，用于判断鼠标是否真的碰到她
+
+# 右键"动作"子菜单：命令号从 CMD_ACTION 起，避免和固定项（1-6）撞车
+CMD_ACTION = 100
+ACTION_MENU = ["idle", "waving", "jumping", "failed", "waiting", "running", "review"]
+STATE_LABELS = {
+    "idle": "待机", "running-right": "向右跑", "running-left": "向左跑",
+    "waving": "挥挥手", "jumping": "跳一下", "failed": "沮丧一下",
+    "waiting": "玩手机", "running": "干活中", "review": "吃点东西",
+}
+
 # interactions
 DRAG_WINDOW = 30.0          # seconds - window used to count "shoved around a lot"
 DRAG_LIMIT = 3              # drags within the window before she gets grumpy
@@ -112,6 +140,30 @@ except Exception:
         ctypes.windll.user32.SetProcessDPIAware()
     except Exception:
         pass
+
+def _display_scale() -> float:
+    """Primary display DPI factor: 1.0 = 100%, 1.5 = 150%.
+
+    Windows scales every UI element by this factor, so the pet has to be scaled the
+    same way or it looks small on a scaled display (at 150% the same 192px cell has to
+    be drawn 1.5x bigger to look the way it does at 100%).
+    """
+    try:
+        dpi = u32.GetDpiForSystem()
+        if dpi:
+            return dpi / 96.0
+    except Exception:
+        pass
+    try:
+        dc = u32.GetDC(None)
+        dpi = g32.GetDeviceCaps(dc, 88)          # LOGPIXELSX
+        u32.ReleaseDC(None, dc)
+        if dpi:
+            return dpi / 96.0
+    except Exception:
+        pass
+    return 1.0
+
 
 # ---------------------------------------------------------------- win32 plumbing
 u32 = ctypes.windll.user32
@@ -174,7 +226,10 @@ ULW_ALPHA = 0x00000002
 AC_SRC_OVER, AC_SRC_ALPHA = 0x00, 0x01
 SPI_GETWORKAREA = 0x0030
 HWND_TOPMOST = wintypes.HWND(-1)
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
 SWP_NOACTIVATE = 0x0010
+MF_POPUP = 0x0010
 TPM_RETURNCMD = 0x0100
 
 WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP = 0x0002, 0x0201, 0x0202
@@ -237,17 +292,85 @@ def premultiplied_bgra(img: Image.Image) -> bytes:
     return np.dstack([rgb[..., 2], rgb[..., 1], rgb[..., 0], alpha]).astype(np.uint8).tobytes()
 
 
+MAX_CACHED_LEVELS = 3         # 同时缓存的缩放档位上限（每档都不小，尤其 150% 屏）
+
+_sheet_img: Image.Image | None = None
+
+
+def _sheet() -> Image.Image:
+    """The atlas, decoded once and shared by every zoom level."""
+    global _sheet_img
+    if _sheet_img is None:
+        img = Image.open(SHEET).convert("RGBA")
+        expected = (8 * CELL_W, 9 * CELL_H)
+        if img.size != expected:
+            logging.warning("unexpected atlas size %s (expected %s)", img.size, expected)
+        _sheet_img = img
+    return _sheet_img
+
+
+class _LazyFrames:
+    """Frames of one zoom level, rendered per animation the first time it is asked for.
+
+    Rendering a whole level costs a few hundred ms (57 frames), which used to stall the
+    click that asked for it. Renders happen per animation instead, so a zoom only pays
+    for the pose on screen and everything else fills in as it is used.
+    """
+
+    def __init__(self, pet: "Pet", scale: float) -> None:
+        self._pet = pet
+        self.scale = scale
+        self.last_used = time.perf_counter()
+        self._cache: dict[str, list[bytes]] = {}
+        self._lock = threading.Lock()
+
+    def __getitem__(self, name: str) -> list[bytes]:
+        frames = self._cache.get(name)
+        if frames is None:
+            with self._lock:
+                frames = self._cache.get(name)
+                if frames is None:
+                    frames = self._pet._render_state(name, self.scale)
+                    self._cache[name] = frames
+        return frames
+
+    def get(self, name: str, default=None):
+        if name in STATES:
+            return self[name]
+        return default
+
+    def __contains__(self, name: str) -> bool:
+        return name in STATES
+
+    def __len__(self) -> int:
+        return len(STATES)
+
+    def keys(self):
+        return STATES.keys()
+
+    def items(self):
+        self.last_used = time.perf_counter()
+        return [(name, self[name]) for name in STATES]
+
+    def cached_bytes(self) -> int:
+        return sum(len(f) for frames in self._cache.values() for f in frames)
+
+
 class Pet:
     def __init__(self, scale: float = DEFAULT_SCALE) -> None:
         if not SHEET.is_file():
             raise SystemExit(f"missing spritesheet: {SHEET}")
-        self.scale = scale
-        self.w = int(CELL_W * scale)
-        self.h = int(CELL_H * scale)
+        # 缩放分两层：rel_scale 是菜单里的档位，scale 是这屏幕上的真实大小
+        self.dpi = _display_scale()
+        self.rel_scale = scale
+        self.scale = scale * self.dpi
+        self.w = int(CELL_W * self.scale)
+        self.h = int(CELL_H * self.scale)
         # frames per zoom level, built with Pillow (GDI StretchBlt destroys the
         # alpha channel of a 32bpp DIB, so it must not be used to zoom)
-        self._scale_frames: dict[float, dict[str, list[bytes]]] = {}
-        self.frames = self._frames_at(scale)
+        self._scale_frames: dict[float, _LazyFrames] = {}
+        self._body_cache: dict[float, dict[str, list[tuple[int, int, int, int]]]] = {}
+        self.frames = self._frames_at(self.scale)
         self.durations: dict[str, list[int]] = {
             n: list(d) for n, (_r, _c, d) in STATES.items()}
 
@@ -277,42 +400,101 @@ class Pet:
         self.drag_times: list[float] = []
         self.hover_started: float | None = None
         self.petted_recently = False
+        # --- drag / throw physics ---
+        self.drag_target: tuple[float, float] | None = None
+        self._drag_track: list[tuple[float, float, float]] = []
+        self.vx = 0.0
+        self.vy = 0.0
+        self.flying = False
+        # --- topmost watchdog ---
+        self._topmost_checked_at = 0.0
+        self._topmost_asserted_at = time.perf_counter()
         self._create_window()
+        logging.info("display scale %.2f -> pet scale %.2f (%dx%d)",
+                     self.dpi, self.scale, self.w, self.h)
 
     # ------------------------------------------------------------ content
-    def _build_frames(self, scale: float) -> dict[str, list[bytes]]:
-        """Render every frame at one zoom level (Pillow keeps alpha intact)."""
-        sheet = Image.open(SHEET).convert("RGBA")
-        expected = (8 * CELL_W, 9 * CELL_H)
-        if sheet.size != expected:
-            logging.warning("unexpected atlas size %s (expected %s)", sheet.size, expected)
+    def _render_state(self, name: str, scale: float) -> list[bytes]:
+        """Render one animation at one zoom level (Pillow keeps alpha intact)."""
+        row, count, _durs = STATES[name]
+        sheet = _sheet()
         size = (int(CELL_W * scale), int(CELL_H * scale))
-        out: dict[str, list[bytes]] = {}
-        for name, (row, count, _durs) in STATES.items():
-            frames = []
-            for c in range(count):
-                cell = sheet.crop((c * CELL_W, row * CELL_H, (c + 1) * CELL_W, (row + 1) * CELL_H))
-                if scale != 1.0:
-                    cell = cell.resize(size, Image.LANCZOS)
-                frames.append(premultiplied_bgra(cell))
-            out[name] = frames
-        return out
-    def _frames_at(self, scale: float) -> dict[str, list[bytes]]:
-        """Frames for a zoom level, rendered once and then served from memory."""
+        frames = []
+        for c in range(count):
+            cell = sheet.crop((c * CELL_W, row * CELL_H, (c + 1) * CELL_W, (row + 1) * CELL_H))
+            if scale != 1.0:
+                cell = cell.resize(size, Image.LANCZOS)
+            frames.append(premultiplied_bgra(cell))
+        return frames
+
+    def _frames_at(self, scale: float) -> _LazyFrames:
+        """Frames of a zoom level (built lazily, kept for a few levels only)."""
         got = self._scale_frames.get(scale)
         if got is None:
-            got = self._build_frames(scale)
+            got = _LazyFrames(self, scale)
             self._scale_frames[scale] = got
+            self._drop_stale_levels(scale)
+        got.last_used = time.perf_counter()
         return got
+
+    def _drop_stale_levels(self, keep: float) -> None:
+        """Keep the cached levels bounded; each one holds a full set of frames."""
+        while len(self._scale_frames) > MAX_CACHED_LEVELS:
+            candidates = [s for s in self._scale_frames if s not in (keep, self.scale)]
+            if not candidates:
+                return
+            oldest = min(candidates, key=lambda s: self._scale_frames[s].last_used)
+            dropped = self._scale_frames.pop(oldest)
+            logging.info("dropped zoom %.2f from cache (%d KB)", oldest,
+                         dropped.cached_bytes() // 1024)
     def _preload_scales(self) -> None:
-        """Warm the other zoom levels up front so 放大/缩小 never stalls."""
-        for s in (1.25, 1.5, 0.75):          # likeliest first
-            if s not in self._scale_frames:
+        """Warm the neighbouring zoom levels so 放大/缩小 never stalls.
+
+        Only the current level plus its two neighbours are kept: each cached level costs
+        one full set of frames, and on a scaled display the bigger ones are not cheap.
+        """
+        i = SCALES.index(self.rel_scale) if self.rel_scale in SCALES else 1
+        wanted = [self.scale]
+        for j in (i + 1, i - 1):
+            if 0 <= j < len(SCALES):
+                wanted.append(SCALES[j] * self.dpi)
+        for s in wanted:
+            levels = self._frames_at(s)
+            for name in STATES:
                 try:
-                    self._frames_at(s)
+                    levels[name]
                 except Exception:
-                    logging.warning("preload scale %.2f failed", s, exc_info=True)
-        logging.info("zoom levels ready: %s", sorted(self._scale_frames))
+                    logging.warning("preload %.2f/%s failed", s, name, exc_info=True)
+        logging.info("zoom levels ready: %s", [round(k, 2) for k in sorted(self._scale_frames)])
+
+    def _body_boxes(self, scale: float, name: str) -> list[tuple[int, int, int, int]]:
+        """Body box (x0, y0, x1, y1) of every frame of one animation.
+
+        The window is a good deal bigger than the pose, so hit-testing the window finds
+        the cursor on empty pixels - the greeting used to fire when the cursor only
+        brushed the transparent corner around her.
+        """
+        per_scale = self._body_cache.setdefault(scale, {})
+        got = per_scale.get(name)
+        if got is None:
+            w, h = int(CELL_W * scale), int(CELL_H * scale)
+            boxes = []
+            for f in self._frames_at(scale)[name]:
+                alpha = np.frombuffer(f, dtype=np.uint8)[3::4].reshape(h, w)
+                ys, xs = np.nonzero(alpha >= BODY_ALPHA_MIN)
+                boxes.append((int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
+                             if len(ys) else (0, 0, w, h))
+            per_scale[name] = boxes
+            got = boxes
+        return got
+
+    def _on_her(self, pt) -> bool:
+        """True when the cursor is on the pose she is currently showing."""
+        boxes = self._body_boxes(self.scale, self.mode)
+        if not boxes:
+            return False
+        x0, y0, x1, y1 = boxes[self.frame_i % len(boxes)]
+        return (self.x + x0 <= pt.x < self.x + x1) and (self.y + y0 <= pt.y < self.y + y1)
 
     # ------------------------------------------------------------ helpers
     def _work_area(self) -> tuple[int, int, int, int]:
@@ -356,6 +538,8 @@ class Pet:
                 u32.GetCursorPos(ctypes.byref(pt))
                 self.drag_off = (pt.x - int(round(self.x)), pt.y - int(round(self.y)))
                 self.press_pt = (pt.x, pt.y)
+                self.drag_target = (self.x, self.y)
+                self._drag_track = []
                 u32.SetCapture(hwnd)
                 return 0
             if msg == WM_MOUSEMOVE and self.dragging:
@@ -370,9 +554,9 @@ class Pet:
                     self.target_x = None
                     self.set_mode("idle")
                 if self.drag_moved:
-                    self.x = float(pt.x - self.drag_off[0])
-                    self.y = float(pt.y - self.drag_off[1])
-                    self._move_window()
+                    # 只记目标，真正的移动交给 step() 里的弹簧跟手
+                    self.drag_target = (float(pt.x - self.drag_off[0]),
+                                        float(pt.y - self.drag_off[1]))
                 return 0
             if msg == WM_LBUTTONDBLCLK:
                 # a real double click arrives as DOWN, UP, DBLCLK, UP - the DBLCLK
@@ -390,6 +574,7 @@ class Pet:
                 return 0
             if msg == WM_LBUTTONUP and self.dragging:
                 self.dragging = False
+                self.drag_target = None
                 u32.ReleaseCapture()
                 self._touch()
                 pt = POINT()
@@ -413,6 +598,14 @@ class Pet:
                         self.set_mode("idle")
                         self.phase = "pause"
                         self.phase_until = time.perf_counter() + random.uniform(1.0, 2.5)
+                        vx, vy = self._release_velocity()
+                        speed = math.hypot(vx, vy)
+                        if speed >= THROW_MIN_SPEED:
+                            clamp = lambda v: max(-MAX_THROW_SPEED, min(MAX_THROW_SPEED, v))
+                            self.vx, self.vy = clamp(vx), clamp(vy)
+                            self.flying = True
+                            self.paused = False
+                            logging.info("throw at %.0f px/s (vx=%.0f vy=%.0f)", speed, self.vx, self.vy)
                 elif self.pending_dblclick:
                     self.pending_dblclick = False
                     logging.info("double click -> 抚摸 (高兴跳)")
@@ -480,17 +673,29 @@ class Pet:
         except Exception:
             logging.warning("icon load failed", exc_info=True)
 
-    def _show_menu(self, hwnd) -> None:
+    def _build_menu(self):
+        """The right-click menu (built separately from showing it, so it can be inspected)."""
         menu = u32.CreatePopupMenu()
         u32.AppendMenuW(menu, 0, 5, "投喂")
         u32.AppendMenuW(menu, 0, 6, "抚摸")
         u32.AppendMenuW(menu, 0x800, 0, None)
         u32.AppendMenuW(menu, 0, 1, "继续" if self.paused else "暂停")
-        si = SCALES.index(self.scale) if self.scale in SCALES else 1
+        si = SCALES.index(self.rel_scale) if self.rel_scale in SCALES else 1
         u32.AppendMenuW(menu, 0 if si < len(SCALES) - 1 else MF_ZOOM_OFF, 2, "放大")
         u32.AppendMenuW(menu, 0 if si > 0 else MF_ZOOM_OFF, 3, "缩小")
         u32.AppendMenuW(menu, 0x800, 0, None)
+        sub = u32.CreatePopupMenu()
+        for i, state in enumerate(ACTION_MENU):
+            u32.AppendMenuW(sub, 0, CMD_ACTION + i, STATE_LABELS[state])
+        u32.AppendMenuW(sub, 0x800, 0, None)
+        u32.AppendMenuW(sub, 0, CMD_ACTION + len(ACTION_MENU), "走一段")
+        u32.AppendMenuW(menu, MF_POPUP, sub, "动作")
+        u32.AppendMenuW(menu, 0x800, 0, None)
         u32.AppendMenuW(menu, 0, 4, "退出")
+        return menu
+
+    def _show_menu(self, hwnd) -> None:
+        menu = self._build_menu()
         pt = POINT()
         u32.GetCursorPos(ctypes.byref(pt))
         u32.SetForegroundWindow(hwnd)
@@ -503,9 +708,19 @@ class Pet:
         if cmd == 1:
             self.paused = not self.paused
         elif cmd in (2, 3):
-            i = SCALES.index(self.scale) if self.scale in SCALES else 1
+            i = SCALES.index(self.rel_scale) if self.rel_scale in SCALES else 1
             i = min(i + 1, len(SCALES) - 1) if cmd == 2 else max(i - 1, 0)
             self._rescale(SCALES[i])
+        elif cmd >= CMD_ACTION:
+            k = cmd - CMD_ACTION
+            self._touch()
+            if k < len(ACTION_MENU):
+                state = ACTION_MENU[k]
+                logging.info("menu 动作 -> %s", state)
+                self.play([state])
+            else:
+                logging.info("menu 动作 -> 走一段")
+                self.start_travel()
         elif cmd == 4:
             u32.PostQuitMessage(0)
         elif cmd == 5:
@@ -513,10 +728,12 @@ class Pet:
         elif cmd == 6:
             self.stroke()
 
-    def _rescale(self, scale: float) -> None:
+    def _rescale(self, rel: float) -> None:
+        scale = rel * self.dpi
         if scale == self.scale:
             return
         cx, cy = self.x + self.w / 2, self.y + self.h
+        self.rel_scale = rel
         self.scale = scale
         self.w, self.h = int(CELL_W * scale), int(CELL_H * scale)
         self.frames = self._frames_at(scale)          # cached: no re-render
@@ -529,7 +746,7 @@ class Pet:
         u32.SetWindowPos(self.hwnd, HWND_TOPMOST, int(self.x), int(self.y),
                          self.w, self.h, SWP_NOACTIVATE)
         self.frame_i = 0
-        logging.info("rescale -> %.2f (%dx%d)", scale, self.w, self.h)
+        logging.info("rescale -> %.2f (rel %.2f, %dx%d)", scale, rel, self.w, self.h)
 
     def _move_window(self) -> None:
         u32.SetWindowPos(self.hwnd, HWND_TOPMOST, int(round(self.x)), int(round(self.y)),
@@ -541,6 +758,93 @@ class Pet:
         u32.UpdateLayeredWindow(self.hwnd, None, ctypes.byref(pt_dst), ctypes.byref(size),
                                 self.mem_dc, ctypes.byref(pt_src), 0,
                                 ctypes.byref(self.blend), ULW_ALPHA)
+
+    # ------------------------------------------------------------ drag, throw, topmost
+    def _track_drag(self, now: float) -> None:
+        """Remember the last ~0.12s of motion so a release knows how fast it was."""
+        self._drag_track.append((now, self.x, self.y))
+        cutoff = now - 0.12
+        while len(self._drag_track) > 2 and self._drag_track[0][0] < cutoff:
+            self._drag_track.pop(0)
+
+    def _release_velocity(self) -> tuple[float, float]:
+        track, self._drag_track = self._drag_track, []
+        if len(track) < 2:
+            return 0.0, 0.0
+        t0, x0, y0 = track[0]
+        t1, x1, y1 = track[-1]
+        dt = max(t1 - t0, 1e-3)
+        return (x1 - x0) / dt, (y1 - y0) / dt
+
+    def _follow_cursor(self, dt: float, now: float) -> None:
+        """Over-damped spring towards the cursor: catches up without jitter or overshoot."""
+        if self.drag_target is None:
+            return
+        tx, ty = self.drag_target
+        k = 1.0 - math.exp(-dt / DRAG_FOLLOW_TAU)
+        self.x += (tx - self.x) * k
+        self.y += (ty - self.y) * k
+        self._track_drag(now)
+        self._move_window()
+
+    def _fly(self, dt: float, now: float) -> None:
+        """Parabolic flight after a throw: gravity, wall bounce, ground friction."""
+        left, top, right, bottom = self._work_area()
+        drag = AIR_DRAG ** dt
+        self.vy += GRAVITY * dt
+        self.vx *= drag
+        self.vy *= drag
+        self.x += self.vx * dt
+        self.y += self.vy * dt
+        if self.x < left:
+            self.x, self.vx = float(left), -self.vx * BOUNCE_WALL
+        elif self.x > right - self.w:
+            self.x, self.vx = float(right - self.w), -self.vx * BOUNCE_WALL
+        if self.y < top:
+            self.y, self.vy = float(top), -self.vy * BOUNCE_WALL
+        ground = float(bottom - self.h)
+        on_ground = self.y >= ground
+        if on_ground:
+            self.y = ground
+            if self.vy > 0:
+                impact = self.vy
+                self.vy = -self.vy * BOUNCE_GROUND
+                if abs(self.vy) < SETTLE_SPEED:
+                    self.vy = 0.0
+                elif impact > 400:
+                    logging.info("landed at %.0f px/s", impact)
+            self.vx *= GROUND_FRICTION ** (dt * 60.0)
+        if on_ground and self.vy == 0.0 and abs(self.vx) < SETTLE_SPEED:
+            self.flying = False
+            self.vx = self.vy = 0.0
+            if self.phase != "interact":
+                self.phase = "pause"
+                self.phase_until = now + random.uniform(0.8, 2.0)
+            logging.info("throw settled at x=%.0f y=%.0f", self.x, self.y)
+        if abs(self.vx) > FLY_RUN_SPEED:
+            self.set_mode("running-right" if self.vx > 0 else "running-left")
+            self.anim_factor = DASH_FACTOR
+        elif self.mode not in ("jumping",):
+            self.set_mode("jumping")
+            self.anim_factor = STROLL_FACTOR
+        self._move_window()
+
+    def _watch_topmost(self, now: float) -> None:
+        """Re-assert the topmost band now and then.
+
+        Setting WS_EX_TOPMOST is not enough to stay above other windows: only a
+        SetWindowPos(HWND_TOPMOST) call actually puts the window in the topmost band, so
+        anything that disturbs the z-order (a fullscreen app, another always-on-top
+        window) can leave her buried while the style bit still looks right.
+        """
+        if now - self._topmost_checked_at < TOPMOST_TICK:
+            return
+        self._topmost_checked_at = now
+        if now - self._topmost_asserted_at < TOPMOST_REASSERT:
+            return
+        self._topmost_asserted_at = now
+        u32.SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
 
     # ------------------------------------------------------------ behaviour
     def set_mode(self, mode: str) -> None:
@@ -565,14 +869,14 @@ class Pet:
         current horizontal line (only x changes). No need to cross the screen."""
         left, _, right, _ = self._work_area()
         d = random.choice([-1, 1])
-        reach = random.uniform(TRAVEL_MIN, TRAVEL_MAX)
+        reach = random.uniform(TRAVEL_MIN, TRAVEL_MAX) * self.scale
         target = self.x + d * reach
         if target < left or target > right - self.w:       # no room that way: turn around
             d = -d
             target = self.x + d * reach
         self.target_x = min(max(target, left), right - self.w)
         self.set_mode("running-right" if self.target_x > self.x else "running-left")
-        self.speed = DASH_SPEED
+        self.speed = DASH_SPEED * self.scale
         self.anim_factor = DASH_FACTOR
         self.walking = abs(self.target_x - self.x) > 3.0
         self.phase = "travel"
@@ -621,6 +925,7 @@ class Pet:
 
     def step(self, dt: float) -> None:
         now = time.perf_counter()
+        self._watch_topmost(now)
 
         # a lone click only counts once we are sure no double click followed: 单击 -> 投喂
         if self.pending_click is not None and now - self.pending_click > CLICK_DELAY:
@@ -631,8 +936,8 @@ class Pet:
         # the cursor brushing over her without clicking is a greeting: 打招呼
         pt = POINT()
         u32.GetCursorPos(ctypes.byref(pt))
-        on_her = (self.x <= pt.x < self.x + self.w) and (self.y <= pt.y < self.y + self.h)
-        if on_her and not self.dragging:
+        on_her = self._on_her(pt)
+        if on_her and not self.dragging and not self.flying:
             if self.hover_started is None:
                 self.hover_started = now
                 logging.info("cursor ON her at (%d,%d); window x=%.0f y=%.0f w=%d h=%d",
@@ -646,7 +951,23 @@ class Pet:
             self.hover_started = None
             self.petted_recently = False
 
-        if self.paused or self.dragging:
+        if self.dragging:
+            self._follow_cursor(dt, now)
+            self._blit(self.frames["idle"][0])
+            return
+
+        if self.flying:
+            # 被甩出去：物理优先，动画照常推进
+            self._fly(dt, now)
+            durs = self.durations[self.mode]
+            if now - self.frame_at >= durs[self.frame_i] * self.anim_factor / 1000.0:
+                self.frame_i = (self.frame_i + 1) % len(durs)
+                self.frame_at = now
+            frames = self.frames[self.mode]
+            self._blit(frames[self.frame_i % len(frames)])
+            return
+
+        if self.paused:
             self._blit(self.frames["idle"][0])
             return
 
