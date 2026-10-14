@@ -38,6 +38,15 @@ Keep identical in EVERY frame: the same body position, the same scale, the same 
 Absolutely no ground shadow, no contact shadow, no ground line, no ellipse or mark under the feet. No scenery, no text, no speed lines, no dust, no glow, no detached effects; keep cyan out of the character.
 Style: clean cel-shaded chibi anime mascot, crisp outlines, flat bright colors.
 
+COLOUR LOCK - these exact colours, in every frame:
+- her eyes are LARGE and BRIGHT ORANGE (the same orange as the trim on her jacket) with black pupils - never brown, never yellow, never a different shape;
+- her hair is PURE WHITE with a small ORANGE ahoge curl on top;
+- her jacket is WHITE with ORANGE trim and a small orange 'mi' logo on the chest;
+- her skirt is a PURE BLACK pleated skirt with a thin ORANGE stripe along the hem - never grey, never brown, never a different colour;
+- her sneakers are white with ORANGE soles;
+- her headphones are WHITE with an orange headband, an orange antenna and ONE black smiling face on the earcup;
+- thick dark outlines around every shape, and flat two-tone cel shading - no soft gradients, no grey wash, no glossy highlights.
+
 SIZE AND STYLE LOCK - she must be the SAME SIZE AND SHAPE as the reference character in every frame:
 - Her body height is about 95% of the slot height: the tip of her ahoge sits near the top edge and the soles of her shoes sit on the bottom edge of the slot, exactly like the reference.
 - The SAME head size, the SAME body width, the SAME arm and leg thickness, the SAME face proportions and the SAME flat cel shading with the same thin dark outline as the reference.
@@ -85,6 +94,8 @@ DETAIL LOCK - all of these must be IDENTICAL in every one of the six frames and 
 - the same orange antenna and headband arcing up over her head, and the same orange 'mi' logo hairclip, in the same place every frame;
 - the same face and the same eyes in the same style (big flat orange eyes, same size and position on the head), the same flat cel shading and the same thin dark outline;
 - the same white-and-orange jacket with its orange trim (never a hoodie, never with the hood raised), the same black pleated skirt with orange trim, the same white sneakers with orange soles.
+
+VIEW LOCK: she faces the VIEWER (front view) in every single frame - the same camera angle as the reference image. Never a side view, never a three-quarter turn, never turned away: her chest, both eyes and the front of her skirt stay towards the camera in all six frames, including the airborne frame.
 
 SIZE LOCK: her body is exactly the same size in all six frames. In the two standing frames she fills about 95% of the slot height, with the soles of her shoes on the bottom edge of the slot and the tip of her ahoge near the top edge. She jumps by tucking her legs and stretching, so she never leaves the slot.
 
@@ -168,7 +179,13 @@ def generate(prompt: str, images: list[Path], size: str, out: Path) -> Path:
 
 
 def main() -> None:
-    state = sys.argv[1]
+    import argparse
+    ap = argparse.ArgumentParser(description="regenerate one animation row")
+    ap.add_argument("state")
+    ap.add_argument("--ref", action="append", default=[],
+                    help="extra reference image (e.g. the character sheet), repeatable")
+    a = ap.parse_args()
+    state = a.state
     if state not in ROWS:
         raise SystemExit(f"unknown state {state!r}; known: {', '.join(ROWS)}")
     cols, rows, count, frames, prop_rules = ROWS[state]
@@ -176,7 +193,13 @@ def main() -> None:
     canonical = RUN / "references" / "canonical-base.png"
     img_w, img_h = SLOT_W * cols, SLOT_H * rows
 
-    prompt = f"""Using the second attached image as the EXACT character identity reference ({IDENTITY}), draw ONE single image containing exactly {count} full-body frames of the SAME character, arranged in a {cols}x{rows} grid.
+    extra = [Path(r).expanduser().resolve() for r in a.ref]
+    refs = [canonical] + extra
+    sheet_note = ("\nThe last attached image is the official character sheet: take her COLOURS and her "
+                  "design from it exactly (white hair, ORANGE eyes, white-and-orange jacket, BLACK pleated "
+                  "skirt with orange trim, white sneakers with orange soles, white headphones with an orange "
+                  "headband)." if extra else "")
+    prompt = f"""Using the second attached image as the EXACT character identity reference ({IDENTITY}), draw ONE single image containing exactly {count} full-body frames of the SAME character, arranged in a {cols}x{rows} grid.{sheet_note}
 
 Grid order: read left to right, top row first.
 The first attached image is a layout guide: follow the slot positions, but DO NOT draw the guide's boxes, lines or background.
@@ -190,7 +213,7 @@ The first attached image is a layout guide: follow the slot positions, but DO NO
     guide = build_guide(cols, rows, RUN / "references" / "layout-guides" / f"{state}-{cols}x{rows}.png")
     raw = RUN / "tmp" / f"{state}-grid-raw.png"
     print(f"generating {state} as a {cols}x{rows} grid ({count} frames) ...", flush=True)
-    generate(prompt, [guide, canonical], f"{img_w}*{img_h}", raw)
+    generate(prompt, [guide] + refs, f"{img_w}*{img_h}", raw)
 
     img = Image.open(raw).convert("RGB")
     print("raw returned:", img.size)

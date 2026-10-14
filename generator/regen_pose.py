@@ -35,7 +35,9 @@ KEEP = """This is the character reference. Keep her EXACTLY as she is and change
 - the SAME art style: the same clean cel shading with flat bright colours, the same thin dark outline, the same face proportions - no extra gradients, no glossy highlights, no extra hair strands, no extra fingers;
 - the SAME chibi proportions: she is a CHIBI mascot - her head is huge (about as wide as her shoulders and roughly 45% of her total height), her torso is SHORT, her arms and legs are SHORT and THICK with big shoes and mitten-like hands. Never draw her taller, slimmer, longer-limbed or more realistic; keep the head-to-body ratio exactly as in the reference;
 - the SAME outfit: the same white-and-orange jacket with its small orange 'mi' logo (never a raised hood), the same black pleated skirt with orange trim, the same white sneakers with orange soles, the same big white headphones with the smiling black face on the earcup;
-- the SAME camera angle: full body, front view, feet towards the bottom of the image;
+- the SAME camera angle: full body, FRONT view facing the viewer exactly like the reference - never a side view, never a three-quarter turn, never turned away; her chest, both eyes and the front of her skirt always face the camera; feet towards the bottom of the image;
+- the SAME colours, exactly: LARGE BRIGHT ORANGE eyes with black pupils, PURE WHITE hair with a small ORANGE ahoge, a WHITE jacket with ORANGE trim and the small orange 'mi' logo, a PURE BLACK pleated skirt with a thin ORANGE stripe along the hem (never grey, never brown), white sneakers with ORANGE soles, WHITE headphones with an orange headband and ONE black smiling face on the earcup;
+- the SAME line work: thick dark outlines around every shape and flat two-tone cel shading - no soft gradients, no grey wash, no glossy highlights;
 - the background stays """ + CHROMA + """ filling everything around her, and there is NO shadow, NO ground line, NO ellipse and no scenery of any kind."""
 
 
