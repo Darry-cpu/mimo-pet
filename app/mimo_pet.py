@@ -53,9 +53,9 @@ STATES = {
 # 帧时长是"慢放前"的基准（休息动作还要乘 WAIT_FACTOR=2.4）：
 # 动作时帧率正常（每帧 0.2~0.3s），"安静"靠轮间更长的停顿实现，而不是把帧拖慢
 EXTRA_STATES = {
-    "daze":  (0, 6, [100] * 5 + [220]),      # 发呆（站着慢慢晃，每帧约 0.24s）
-    "shake": (1, 6, [80] * 5 + [160]),       # 摇头（快速轻甩，每帧约 0.19s）
-    "music": (2, 6, [130] * 5 + [260]),      # 听歌（坐着听，每帧约 0.31s）
+    "daze":  (0, 6, [180] * 5 + [300]),      # 发呆（每帧约 0.43s）
+    "shake": (1, 6, [160] * 5 + [280]),      # 摇头（每帧约 0.38s）
+    "music": (2, 6, [190] * 5 + [320]),      # 听歌（每帧约 0.46s）
 }
 ALL_STATES = {**STATES, **EXTRA_STATES}
 # 休息时段轮流出现的动作（以前只有玩手机 / 干活中）
@@ -1005,7 +1005,9 @@ class Pet:
         self.set_mode(random.choice(REST_STATES))
         self.phase = "rest"
         self.phase_until = time.perf_counter() + REST_SECONDS
-        logging.info("rest -> %s for %.0fs", self.mode, REST_SECONDS)
+        frame_ms = self.durations[self.mode][0] * (
+            WAIT_FACTOR if self.mode in REST_STATES else self.anim_factor)
+        logging.info("rest -> %s for %.0fs (%.0f ms/帧)", self.mode, REST_SECONDS, frame_ms)
 
     def start_travel(self) -> None:
         """Set off for a random distance in a random direction, staying on the
