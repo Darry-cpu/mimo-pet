@@ -50,10 +50,12 @@ STATES = {
 }
 
 # 附加图集（assets/animations-extra.webp）里的动作：行号属于那张图，不占 Codex 契约的 8x9
+# 帧时长是"慢放前"的基准，休息动作还要乘 WAIT_FACTOR=2.4。细微动作（发呆/摇头）如果每帧停太久
+# 就会像卡住，所以基准压得比玩手机低：实际每帧发呆约0.19s、摇头约0.22s、听歌约0.31s
 EXTRA_STATES = {
-    "daze":  (0, 6, [500] * 5 + [700]),      # 发呆（站着慢慢晃）
-    "shake": (1, 6, [400] * 5 + [600]),      # 摇头（左右转头）
-    "music": (2, 6, [440] * 5 + [700]),      # 听歌（坐着听）
+    "daze":  (0, 6, [80] * 5 + [200]),       # 发呆（站着慢慢晃）
+    "shake": (1, 6, [90] * 5 + [160]),       # 摇头（左右转头）
+    "music": (2, 6, [130] * 5 + [260]),      # 听歌（坐着听）
 }
 ALL_STATES = {**STATES, **EXTRA_STATES}
 # 休息时段轮流出现的动作（以前只有玩手机 / 干活中）
@@ -81,6 +83,8 @@ DASH_FACTOR = 1.0           # animation speed while crossing the screen
 WAIT_FACTOR = 2.4           # 玩手机再放慢一档，刷手机本来就该慢悠悠
 WAIT_HOLD_MIN = 2.2         # 每播完一轮玩手机，停在原地“看屏幕”一会儿
 WAIT_HOLD_MAX = 4.8         # （像认真看内容，而不是无限鬼畜循环）
+REST_HOLD_MIN = 0.8         # 发呆/摇头/听歌：每轮之间只停一小会儿（像玩手机那样久停会显得卡）
+REST_HOLD_MAX = 1.6         # 玩手机 / 干活中 仍用上面的长停顿
 STROLL_SPEED = 78.0         # px per second while strolling (matches the run cycle)
 DASH_SPEED = 200.0          # px per second while crossing the screen
 REST_SECONDS = 30.0         # how long she stays on 玩手机 / 干活中 between trips
@@ -1121,8 +1125,11 @@ class Pet:
             self.frame_i = (self.frame_i + 1) % len(durs)
             self.frame_at = now
             if self.mode in REST_STATES and loop_done:
-                # one pass of 刷手机 is done: stay on the first pose a while
-                self.frame_at = now + random.uniform(WAIT_HOLD_MIN, WAIT_HOLD_MAX)
+                # one pass of a rest animation is done: stay on the first pose a while
+                if self.mode in ("waiting", "running"):
+                    self.frame_at = now + random.uniform(WAIT_HOLD_MIN, WAIT_HOLD_MAX)
+                else:
+                    self.frame_at = now + random.uniform(REST_HOLD_MIN, REST_HOLD_MAX)
 
         if self.phase == "travel" and self.walking and self.target_x is not None:
             dx = self.target_x - self.x
