@@ -39,8 +39,8 @@ SCALES = [0.75, 1.0, 1.25, 1.5]
 # frame counts and per-frame durations, matching references/animation-rows.md
 STATES = {
     "idle":          (0, 6, [1680, 660, 660, 840, 840, 1920]),
-    "running-right": (1, 8, [120] * 7 + [220]),
-    "running-left":  (2, 8, [120] * 7 + [220]),
+    "running-right": (1, 6, [144] * 5 + [240]),   # 6 帧，一轮 0.96s（= 旧的 8x120ms）
+    "running-left":  (2, 6, [144] * 5 + [240]),   # ——所以走路速度/步幅不用改，不会滑步
     "waving":        (3, 4, [140, 140, 140, 280]),
     "jumping":       (4, 6, [150, 140, 140, 150, 140, 240]),
     "failed":        (5, 8, [140] * 7 + [240]),

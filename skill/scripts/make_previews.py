@@ -24,8 +24,8 @@ CELL_W, CELL_H = 192, 208
 # mirrors app/mimo_pet.py: name -> (row, frame count, durations in ms)
 STATES: dict[str, tuple[int, int, list[int]]] = {
     "idle":          (0, 6, [1680, 660, 660, 840, 840, 1920]),
-    "running-right": (1, 8, [120] * 7 + [220]),
-    "running-left":  (2, 8, [120] * 7 + [220]),
+    "running-right": (1, 6, [144] * 5 + [240]),
+    "running-left":  (2, 6, [144] * 5 + [240]),
     "waving":        (3, 4, [140, 140, 140, 280]),
     "jumping":       (4, 5, [140, 140, 140, 140, 280]),
     "failed":        (5, 8, [140] * 7 + [240]),
