@@ -4,7 +4,7 @@
 
 ## 下载（推荐）
 
-**[📥 下载安装包 MimoPet-Setup-1.0.5.exe](https://github.com/Darry-cpu/mimo-pet/releases/latest)**
+**[📥 下载安装包 MimoPet-Setup-1.0.6.exe](https://github.com/Darry-cpu/mimo-pet/releases/latest)**
 
 双击即可安装，**无需管理员权限、无需安装 Python**。全部版本见 [Releases](https://github.com/Darry-cpu/mimo-pet/releases)。
 
@@ -84,7 +84,7 @@ iscc mimo_setup.iss
 
 - PNG/WebP，`1536 x 1872`，`8` 列 × `9` 行，每格 `192 x 208`
 - 透明背景，未使用格子必须全透明
-- 每行帧数：`[6, 8, 8, 4, 5, 8, 6, 6, 6]`
+- 每行帧数：`[6, 8, 8, 4, 6, 8, 6, 6, 6]`（第 4 行跳跃为 6 帧：比 Codex 契约多一帧，Codex 端会忽略多出的那格，本应用按 6 帧播放）
 
 | 行 | 状态 | 含义 |
 |---|---|---|

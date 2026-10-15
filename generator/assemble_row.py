@@ -47,7 +47,8 @@ def background_colour(arr: np.ndarray, border: int = 6) -> np.ndarray:
     return np.median(edges, axis=0)
 
 
-def key(img: Image.Image, fill_tol: float = 60.0, lo: float = 45.0, hi: float = 115.0) -> tuple[Image.Image, int]:
+def key(img: Image.Image, fill_tol: float | None = None, lo: float = 45.0, hi: float = 115.0,
+        soft: bool | None = None) -> tuple[Image.Image, int]:
     """Derive alpha for a pose drawn on the flat cyan backdrop.
 
     The generated cyan is rarely uniform (it comes back with a soft vignette), so a plain
@@ -59,6 +60,14 @@ def key(img: Image.Image, fill_tol: float = 60.0, lo: float = 45.0, hi: float = 
     bg = background_colour(arr)
     dist = np.linalg.norm(arr - bg[None, None, :], axis=-1)
 
+    # A light backdrop (a white sheet) is the same colour as her hair and shoes, so colour
+    # alone cannot separate them: fall back to connectivity and keep the key hard, letting
+    # the downscale to the atlas cell smooth the edge instead.
+    if soft is None:
+        soft = bool(bg.mean() < 200.0)
+    if fill_tol is None:
+        fill_tol = 60.0 if soft else 10.0
+
     probe = Image.fromarray(np.clip(255.0 - dist, 0, 255).astype(np.uint8), "L").convert("RGB")
     marker = (255, 0, 255)
     for seed in ((0, 0), (probe.width - 1, 0), (0, probe.height - 1),
@@ -67,7 +76,10 @@ def key(img: Image.Image, fill_tol: float = 60.0, lo: float = 45.0, hi: float = 
     marked = np.asarray(probe)
     is_background = (marked[..., 0] == marker[0]) & (marked[..., 1] == marker[1]) & (marked[..., 2] == marker[2])
 
-    alpha = np.clip((dist - lo) / (hi - lo), 0.0, 1.0)
+    if soft:
+        alpha = np.clip((dist - lo) / (hi - lo), 0.0, 1.0)
+    else:
+        alpha = np.where(is_background, 0.0, 1.0)
     alpha[is_background] = 0.0
     af = np.clip(alpha, 1e-6, 1.0)[..., None]
     fg = np.clip((arr - (1.0 - af) * bg[None, None, :]) / af, 0, 255)
