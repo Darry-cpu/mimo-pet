@@ -30,3 +30,6 @@ auth.json
 Thumbs.db
 Desktop.ini
 .DS_Store
+# 余额预警的本机配置（含邮箱授权码，绝不入库）
+alert.ini
+alert_seen.json

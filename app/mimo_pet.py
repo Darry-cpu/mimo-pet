@@ -31,6 +31,9 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+import alert                    # 余额预警：只读检查邮箱里小米发来的提醒邮件
+import speech                   # 气泡窗口：她唯一能显示文字的地方
+
 # ---------------------------------------------------------------- configuration
 CELL_W, CELL_H = 192, 208
 DEFAULT_SCALE = 1.0
@@ -62,6 +65,8 @@ EXTRA_STATES = {
     # 打瞌睡（流程第二步）：第 2~5 帧放慢，每帧 18372ms ×1.6 ≈ 29.4s；
     # 与打哈欠合计 (1010+73988)×1.6 ≈ 120s，即用户要求的"总体维持 2 分钟"
     "doze":  (6, 6, [200, 18372, 18372, 18372, 18372, 300]),
+    # 惊恐（余额预警专用）：每帧 6000ms ×1.6 ≈ 9.6s，整段约 60s，和提醒气泡同步
+    "panic": (7, 6, [6000] * 5 + [7500]),
 }
 ALL_STATES = {**STATES, **EXTRA_STATES}
 # 休息时段轮流出现的动作（以前只有玩手机 / 干活中）
@@ -121,6 +126,8 @@ BODY_ALPHA_MIN = 32         # alpha 高于此值才算"身体"，用于判断鼠
 
 # 右键"动作"子菜单：命令号从 CMD_ACTION 起，避免和固定项（1-6）撞车
 CMD_ACTION = 100
+# 右键"余额预警"子菜单：+0 打开配置文件 / +1 测试连接 / +2 试一下提醒
+CMD_ALERT = 200
 ACTION_MENU = ["idle", "waving", "jumping", "failed", "waiting", "running", "review",
               "daze", "shake", "music", "shy", "angry", "yawn", "doze"]
 STATE_LABELS = {
@@ -374,7 +381,7 @@ def _sheet(path: Path | None = None) -> Image.Image:
     img = _sheet_cache.get(path)
     if img is None:
         img = Image.open(path).convert("RGBA")
-        expected = ((8 * CELL_W, 7 * CELL_H) if path == SHEET2
+        expected = ((8 * CELL_W, 8 * CELL_H) if path == SHEET2
                     else (8 * CELL_W, 9 * CELL_H))
         if img.size != expected:
             logging.warning("unexpected atlas size %s (expected %s) in %s",
@@ -477,6 +484,11 @@ class Pet:
         # 上次"有人碰她"的时刻：碰/点/拖/右键菜单都算，超过 SLEEP_AFTER 就去睡
         self.last_touch_at = time.perf_counter()
         self.waking = False          # 已经在"惊醒"这一刻里了，别每帧重复触发
+        # --- 余额预警（邮件通道）---
+        self.bubble = None           # 气泡窗口，run() 里建
+        self.alert_cfg = None
+        self.watcher = None
+        self.pending_alert: tuple[str, str | None] | None = None
         # --- drag / throw physics ---
         self.drag_target: tuple[float, float] | None = None
         self._drag_track: list[tuple[float, float, float]] = []
@@ -787,6 +799,12 @@ class Pet:
         u32.AppendMenuW(sub, 0, CMD_ACTION + len(ACTION_MENU), "走一段")
         u32.AppendMenuW(menu, MF_POPUP, sub, "动作")
         u32.AppendMenuW(menu, 0x800, 0, None)
+        asub = u32.CreatePopupMenu()
+        u32.AppendMenuW(asub, 0, CMD_ALERT + 0, "打开配置文件")
+        u32.AppendMenuW(asub, 0, CMD_ALERT + 1, "测试连接")
+        u32.AppendMenuW(asub, 0, CMD_ALERT + 2, "试一下提醒")
+        u32.AppendMenuW(menu, MF_POPUP, asub, "余额预警")
+        u32.AppendMenuW(menu, 0x800, 0, None)
         u32.AppendMenuW(menu, 0, 4, "退出")
         return menu
 
@@ -808,6 +826,8 @@ class Pet:
             i = SCALES.index(self.rel_scale) if self.rel_scale in SCALES else 1
             i = min(i + 1, len(SCALES) - 1) if cmd == 2 else max(i - 1, 0)
             self._rescale(SCALES[i])
+        elif cmd >= CMD_ALERT:
+            self._on_alert_command(cmd - CMD_ALERT)
         elif cmd >= CMD_ACTION:
             k = cmd - CMD_ACTION
             self._touch()
@@ -1112,6 +1132,7 @@ class Pet:
         now = time.perf_counter()
         self._watch_topmost(now)
         self._step_knock(dt)
+        self._pump_alert(now)
 
         # a lone click only counts once we are sure no double click followed: 单击 -> 投喂
         if self.pending_click is not None and now - self.pending_click > CLICK_DELAY:
@@ -1203,9 +1224,78 @@ class Pet:
         frames = self.frames[self.mode]
         self._blit(frames[self.frame_i % len(frames)])
 
+    # ------------------------------------------------- 余额预警（邮件通道）
+    def _start_alerts(self) -> None:
+        """Create the bubble and start the mailbox watcher. Never fatal: if either
+        fails she simply carries on without alerts."""
+        try:
+            self.bubble = speech.SpeechBubble(self.dpi)
+        except Exception:                                              # noqa: BLE001
+            self.bubble = None
+            logging.warning("气泡窗口建不起来，文字提醒关闭", exc_info=True)
+        try:
+            self.alert_cfg = alert.load_config()
+            self.watcher = alert.EmailWatcher(alert.load_config, self._on_email_alert)
+            threading.Thread(target=self.watcher.run, daemon=True).start()
+        except Exception:                                              # noqa: BLE001
+            logging.warning("余额预警起不来", exc_info=True)
+
+    def _pump_alert(self, now: float) -> None:
+        """Show a pending reminder and keep the bubble glued to her."""
+        if self.pending_alert is not None:
+            text, pose = self.pending_alert
+            self.pending_alert = None
+            logging.info("提醒: %s", text)
+            if self.bubble is not None:
+                self.bubble.on_click = self._open_alert_page
+                self.bubble.show(text, self.x, self.y, self.w, self.h,
+                                 seconds=60.0, now=now)
+            if pose:
+                self.play([pose])
+        if self.bubble is not None:
+            try:
+                self.bubble.tick(now, self.x, self.y, self.w, self.h)
+            except Exception:                                          # noqa: BLE001
+                logging.debug("bubble tick failed", exc_info=True)
+
+    def _on_email_alert(self, text: str) -> None:
+        """Called from the watcher thread — just leaves a note for the UI loop."""
+        self.pending_alert = (text, self._alert_pose())
+
+    def _alert_pose(self) -> str | None:
+        pose = (getattr(self.alert_cfg, "pose", "") or "panic").strip()
+        return pose if pose in ALL_STATES else "panic"
+
+    def _open_alert_page(self) -> None:
+        page = (getattr(self.alert_cfg, "page", "") or "").strip() \
+            or "https://platform.xiaomimimo.com/"
+        try:
+            os.startfile(page)                                          # noqa: S606
+            logging.info("opened %s", page)
+        except Exception:                                               # noqa: BLE001
+            logging.warning("打不开 %s", page, exc_info=True)
+
+    def _on_alert_command(self, k: int) -> None:
+        self._touch()
+        if k == 0:
+            try:
+                os.startfile(alert.ensure_config())                      # noqa: S606
+            except Exception:                                           # noqa: BLE001
+                logging.warning("打不开配置文件", exc_info=True)
+        elif k == 1:
+            self.pending_alert = ("正在连邮箱看看…", None)
+
+            def work() -> None:
+                self.pending_alert = (alert.test_connection(alert.load_config()), None)
+
+            threading.Thread(target=work, daemon=True).start()
+        elif k == 2:
+            self.pending_alert = (alert.ALERT_TEXT, self._alert_pose())
+
     def run(self) -> None:
         # render the other zoom levels in the background right away
         threading.Thread(target=self._preload_scales, daemon=True).start()
+        self._start_alerts()
         msg = MSG()
         last = time.perf_counter()
         logging.info("message loop start")

@@ -1,11 +1,11 @@
-; ---------------------------------------------------------------
+﻿; ---------------------------------------------------------------
 ;  Mimo 桌宠 - Inno Setup 安装脚本
 ;  前置步骤：python build_exe.py   生成 dist\MimoPet.exe
-;  编译命令：iscc mimo_setup.iss    产出 out\Mimo桌宠安装包-1.1.9.exe
+;  编译命令：iscc mimo_setup.iss    产出 out\Mimo桌宠安装包-1.1.13.exe
 ; ---------------------------------------------------------------
 
 #define AppName "Mimo 桌宠"
-#define AppVersion "1.1.9"
+#define AppVersion "1.1.13"
 #define AppExe "MimoPet.exe"
 #define AppId "8E4C1D22-9A3B-4F6E-8C71-2B5D7A0F1E33"
 

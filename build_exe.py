@@ -39,6 +39,7 @@ def main() -> None:
         "--icon", str(APP / "mimo.ico"),
         "--add-data", f"{REPO / 'assets' / 'spritesheet.webp'};.",
         "--add-data", f"{REPO / 'assets' / 'animations-extra.webp'};.",
+        "--add-data", f"{REPO / 'assets' / 'speech-bubble.png'};.",
         "--add-data", f"{APP / 'mimo.ico'};.",
         "--distpath", str(DIST),
         "--workpath", str(BUILD),
