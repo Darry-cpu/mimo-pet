@@ -25,8 +25,9 @@ EXE = DIST / "MimoPet.exe"
 def main() -> None:
     if not (APP / "mimo_pet.py").is_file():
         raise SystemExit("app/mimo_pet.py not found")
-    if not (REPO / "assets" / "spritesheet.webp").is_file():
-        raise SystemExit("assets/spritesheet.webp not found")
+    for required in ("assets/spritesheet.webp", "assets/animations-extra.webp"):
+        if not (REPO / required).is_file():
+            raise SystemExit(required + " not found")
 
     shutil.rmtree(DIST, ignore_errors=True)
     shutil.rmtree(BUILD, ignore_errors=True)
@@ -37,6 +38,7 @@ def main() -> None:
         "--name", "MimoPet",
         "--icon", str(APP / "mimo.ico"),
         "--add-data", f"{REPO / 'assets' / 'spritesheet.webp'};.",
+        "--add-data", f"{REPO / 'assets' / 'animations-extra.webp'};.",
         "--add-data", f"{APP / 'mimo.ico'};.",
         "--distpath", str(DIST),
         "--workpath", str(BUILD),

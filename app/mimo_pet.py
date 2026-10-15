@@ -49,6 +49,16 @@ STATES = {
     "review":        (8, 6, [150] * 5 + [280]),
 }
 
+# 附加图集（assets/animations-extra.webp）里的动作：行号属于那张图，不占 Codex 契约的 8x9
+EXTRA_STATES = {
+    "daze":  (0, 6, [500] * 5 + [700]),      # 发呆（站着慢慢晃）
+    "shake": (1, 6, [400] * 5 + [600]),      # 摇头（左右转头）
+    "music": (2, 6, [440] * 5 + [700]),      # 听歌（坐着听）
+}
+ALL_STATES = {**STATES, **EXTRA_STATES}
+# 休息时段轮流出现的动作（以前只有玩手机 / 干活中）
+REST_STATES = ["waiting", "running", "daze", "shake", "music"]
+
 # ---------------------------------------------------------------- behaviour script
 # 触发规则（按用户指定）：
 #   单击        -> 投喂     -> 吃饭中
@@ -103,11 +113,13 @@ BODY_ALPHA_MIN = 32         # alpha 高于此值才算"身体"，用于判断鼠
 
 # 右键"动作"子菜单：命令号从 CMD_ACTION 起，避免和固定项（1-6）撞车
 CMD_ACTION = 100
-ACTION_MENU = ["idle", "waving", "jumping", "failed", "waiting", "running", "review"]
+ACTION_MENU = ["idle", "waving", "jumping", "failed", "waiting", "running", "review",
+              "daze", "shake", "music"]
 STATE_LABELS = {
     "idle": "待机", "running-right": "向右跑", "running-left": "向左跑",
     "waving": "挥挥手", "jumping": "跳一下", "failed": "沮丧一下",
     "waiting": "玩手机", "running": "干活中", "review": "吃点东西",
+    "daze": "发呆", "shake": "摇头", "music": "听歌",
 }
 
 # interactions
@@ -126,6 +138,7 @@ def _resource(name: str) -> Path:
 
 HERE = Path(__file__).resolve().parent
 SHEET = _resource("spritesheet.webp")
+SHEET2 = _resource("animations-extra.webp")
 ICON = _resource("mimo.ico")
 
 _data_dir = Path(os.environ.get("LOCALAPPDATA", HERE)) / "MimoPet"
@@ -333,19 +346,22 @@ def premultiplied_bgra(img: Image.Image) -> bytes:
 
 MAX_CACHED_LEVELS = 3         # 同时缓存的缩放档位上限（每档都不小，尤其 150% 屏）
 
-_sheet_img: Image.Image | None = None
+_sheet_cache: dict[Path, Image.Image] = {}
 
 
-def _sheet() -> Image.Image:
-    """The atlas, decoded once and shared by every zoom level."""
-    global _sheet_img
-    if _sheet_img is None:
-        img = Image.open(SHEET).convert("RGBA")
-        expected = (8 * CELL_W, 9 * CELL_H)
+def _sheet(path: Path | None = None) -> Image.Image:
+    """An atlas, decoded once and shared by every zoom level."""
+    path = path or SHEET          # resolved at call time, so re-pointing SHEET works
+    img = _sheet_cache.get(path)
+    if img is None:
+        img = Image.open(path).convert("RGBA")
+        expected = ((8 * CELL_W, 3 * CELL_H) if path == SHEET2
+                    else (8 * CELL_W, 9 * CELL_H))
         if img.size != expected:
-            logging.warning("unexpected atlas size %s (expected %s)", img.size, expected)
-        _sheet_img = img
-    return _sheet_img
+            logging.warning("unexpected atlas size %s (expected %s) in %s",
+                            img.size, expected, path.name)
+        _sheet_cache[path] = img
+    return img
 
 
 class _LazyFrames:
@@ -374,22 +390,22 @@ class _LazyFrames:
         return frames
 
     def get(self, name: str, default=None):
-        if name in STATES:
+        if name in ALL_STATES:
             return self[name]
         return default
 
     def __contains__(self, name: str) -> bool:
-        return name in STATES
+        return name in ALL_STATES
 
     def __len__(self) -> int:
-        return len(STATES)
+        return len(ALL_STATES)
 
     def keys(self):
-        return STATES.keys()
+        return ALL_STATES.keys()
 
     def items(self):
         self.last_used = time.perf_counter()
-        return [(name, self[name]) for name in STATES]
+        return [(name, self[name]) for name in ALL_STATES]
 
     def cached_bytes(self) -> int:
         return sum(len(f) for frames in self._cache.values() for f in frames)
@@ -411,7 +427,7 @@ class Pet:
         self._body_cache: dict[float, dict[str, list[tuple[int, int, int, int]]]] = {}
         self.frames = self._frames_at(self.scale)
         self.durations: dict[str, list[int]] = {
-            n: list(d) for n, (_r, _c, d) in STATES.items()}
+            n: list(d) for n, (_r, _c, d) in ALL_STATES.items()}
 
         self.x = 300.0
         self.y = float(self._default_y())
@@ -461,8 +477,12 @@ class Pet:
     # ------------------------------------------------------------ content
     def _render_state(self, name: str, scale: float) -> list[bytes]:
         """Render one animation at one zoom level (Pillow keeps alpha intact)."""
-        row, count, _durs = STATES[name]
-        sheet = _sheet()
+        if name in EXTRA_STATES:
+            row, count, _durs = EXTRA_STATES[name]
+            sheet = _sheet(SHEET2)
+        else:
+            row, count, _durs = STATES[name]
+            sheet = _sheet()
         size = (int(CELL_W * scale), int(CELL_H * scale))
         frames = []
         for c in range(count):
@@ -505,7 +525,7 @@ class Pet:
                 wanted.append(SCALES[j] * self.dpi)
         for s in wanted:
             levels = self._frames_at(s)
-            for name in STATES:
+            for name in ALL_STATES:
                 try:
                     levels[name]
                 except Exception:
@@ -980,7 +1000,7 @@ class Pet:
         self.target_x = None
         self.step_until = 0.0
         self.anim_factor = STROLL_FACTOR
-        self.set_mode(random.choice(["waiting", "running"]))
+        self.set_mode(random.choice(REST_STATES))
         self.phase = "rest"
         self.phase_until = time.perf_counter() + REST_SECONDS
         logging.info("rest -> %s for %.0fs", self.mode, REST_SECONDS)
@@ -1095,12 +1115,12 @@ class Pet:
 
         # animation timing, slowed by anim_factor so the motion reads naturally
         durs = self.durations[self.mode]
-        factor = WAIT_FACTOR if self.mode == "waiting" else self.anim_factor
+        factor = WAIT_FACTOR if self.mode in REST_STATES else self.anim_factor
         if now - self.frame_at >= durs[self.frame_i] * factor / 1000.0:
             loop_done = self.frame_i == len(durs) - 1
             self.frame_i = (self.frame_i + 1) % len(durs)
             self.frame_at = now
-            if self.mode == "waiting" and loop_done:
+            if self.mode in REST_STATES and loop_done:
                 # one pass of 刷手机 is done: stay on the first pose a while
                 self.frame_at = now + random.uniform(WAIT_HOLD_MIN, WAIT_HOLD_MAX)
 
