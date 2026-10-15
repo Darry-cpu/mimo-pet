@@ -43,9 +43,9 @@ STATES = {
     "running-left":  (2, 6, [144] * 5 + [240]),   # ——所以走路速度/步幅不用改，不会滑步
     "waving":        (3, 6, [140, 140, 150, 200, 220, 280]),  # 站定→抬手→挥两下→收回
     "jumping":       (4, 6, [150, 140, 140, 150, 140, 240]),
-    "failed":        (5, 8, [140] * 7 + [240]),
+    "failed":        (5, 6, [140] * 5 + [240]),  # 素材只有 6 帧（后 2 格留空）
     "waiting":       (6, 6, [150] * 5 + [260]),
-    "running":       (7, 6, [120] * 5 + [220]),
+    "running":       (7, 6, [190] * 5 + [350]),  # 六帧是六个完全不同的修机器人场景，比官方表放慢一档才看得清
     "review":        (8, 6, [150] * 5 + [280]),
 }
 
@@ -56,6 +56,12 @@ EXTRA_STATES = {
     "daze":  (0, 6, [180] * 5 + [300]),      # 发呆（每帧约 0.43s）
     "shake": (1, 6, [160] * 5 + [280]),      # 摇头（每帧约 0.38s）
     "music": (2, 6, [190] * 5 + [320]),      # 听歌（每帧约 0.46s）
+    "shy":   (3, 6, [200] * 5 + [360]),      # 害羞（接在挥手后面，每帧约 0.32s）
+    "angry": (4, 6, [150] * 5 + [300]),      # 生气（和沮丧随机二选一，每帧约 0.24s）
+    "yawn":  (5, 6, [150] * 5 + [260]),      # 打哈欠（"5 分钟没人理"流程的第一步）
+    # 打瞌睡（流程第二步）：第 2~5 帧放慢，每帧 18372ms ×1.6 ≈ 29.4s；
+    # 与打哈欠合计 (1010+73988)×1.6 ≈ 120s，即用户要求的"总体维持 2 分钟"
+    "doze":  (6, 6, [200, 18372, 18372, 18372, 18372, 300]),
 }
 ALL_STATES = {**STATES, **EXTRA_STATES}
 # 休息时段轮流出现的动作（以前只有玩手机 / 干活中）
@@ -65,13 +71,13 @@ REST_STATES = ["waiting", "running", "daze", "shake", "music"]
 # 触发规则（按用户指定）：
 #   单击        -> 投喂     -> 吃饭中
 #   双击        -> 抚摸     -> 高兴地跳
-#   鼠标碰到不点 -> 打招呼   -> 挥手
-#   频繁挪动     -> 被弄烦了 -> 沮丧
+#   鼠标碰到不点 -> 打招呼   -> 挥手 -> 害羞
+#   频繁挪动     -> 被弄烦了 -> 沮丧 / 生气（随机）
 # 平时无人打扰：玩手机 / 干活中 各保持 30 秒，然后从一侧跑到另一侧。
 CLICK_REACTIONS = [["review", "review"]]                 # 投喂 -> 吃饭中
 DBLCLICK_REACTIONS = [["jumping", "jumping"]]            # 抚摸 -> 高兴跳
-HOVER_REACTIONS = [["waving"]]                           # 打招呼
-GRUMPY_REACTION = ["failed", "failed"]                   # 沮丧
+HOVER_REACTIONS = [["waving", "shy"]]                    # 打招呼 -> 挥手，紧接着害羞
+GRUMPY_REACTIONS = [["failed", "failed"], ["angry", "angry"]]  # 被弄烦了 -> 沮丧 / 生气 随机
 
 FPS = 60
 
@@ -116,26 +122,37 @@ BODY_ALPHA_MIN = 32         # alpha 高于此值才算"身体"，用于判断鼠
 # 右键"动作"子菜单：命令号从 CMD_ACTION 起，避免和固定项（1-6）撞车
 CMD_ACTION = 100
 ACTION_MENU = ["idle", "waving", "jumping", "failed", "waiting", "running", "review",
-              "daze", "shake", "music"]
+              "daze", "shake", "music", "shy", "angry", "yawn", "doze"]
 STATE_LABELS = {
     "idle": "待机", "running-right": "向右跑", "running-left": "向左跑",
     "waving": "挥挥手", "jumping": "跳一下", "failed": "沮丧一下",
     "waiting": "玩手机", "running": "干活中", "review": "吃点东西",
-    "daze": "发呆", "shake": "摇头", "music": "听歌",
+    "daze": "发呆", "shake": "摇头", "music": "听歌", "shy": "害羞",
+    "angry": "生气", "yawn": "打哈欠", "doze": "打瞌睡",
 }
 
 # interactions
 DRAG_WINDOW = 30.0          # seconds - window used to count "shoved around a lot"
 DRAG_LIMIT = 3              # drags within the window before she gets grumpy
 HOVER_PET_SECONDS = 1.2     # cursor resting on her this long = 打招呼
+SLEEP_AFTER = 300.0         # s - 这么久没人碰她 -> 打哈欠 -> 打瞌睡（合计约 2 分钟）
+WAKE_HOLD = 0.45            # s - 睡梦中被碰到后，停在她"惊醒"那一帧多久
 CLICK_DELAY = 0.28          # wait this long to be sure a lone click is not a double click
 
 def _resource(name: str) -> Path:
-    """Path to a bundled file, whether running from source or from a one-file exe."""
+    """Path to a bundled file, whether running from source or from a one-file exe.
+
+    In a one-file exe PyInstaller unpacks next to _MEIPASS; running from source the
+    file is next to this script, and the atlases live one level up in ``assets/``.
+    """
     base = getattr(sys, "_MEIPASS", None)
     if base:
         return Path(base) / name
-    return Path(__file__).resolve().parent / name
+    here = Path(__file__).resolve().parent
+    for candidate in (here / name, here.parent / "assets" / name):
+        if candidate.is_file():
+            return candidate
+    return here / name
 
 
 HERE = Path(__file__).resolve().parent
@@ -357,7 +374,7 @@ def _sheet(path: Path | None = None) -> Image.Image:
     img = _sheet_cache.get(path)
     if img is None:
         img = Image.open(path).convert("RGBA")
-        expected = ((8 * CELL_W, 3 * CELL_H) if path == SHEET2
+        expected = ((8 * CELL_W, 7 * CELL_H) if path == SHEET2
                     else (8 * CELL_W, 9 * CELL_H))
         if img.size != expected:
             logging.warning("unexpected atlas size %s (expected %s) in %s",
@@ -457,6 +474,9 @@ class Pet:
         self.drag_times: list[float] = []
         self.hover_started: float | None = None
         self.petted_recently = False
+        # 上次"有人碰她"的时刻：碰/点/拖/右键菜单都算，超过 SLEEP_AFTER 就去睡
+        self.last_touch_at = time.perf_counter()
+        self.waking = False          # 已经在"惊醒"这一刻里了，别每帧重复触发
         # --- drag / throw physics ---
         self.drag_target: tuple[float, float] | None = None
         self._drag_track: list[tuple[float, float, float]] = []
@@ -656,8 +676,9 @@ class Pet:
                     logging.info("drag #%d within %.0fs", len(self.drag_times), DRAG_WINDOW)
                     if len(self.drag_times) >= DRAG_LIMIT:
                         self.drag_times.clear()
-                        logging.info("moved around %d times -> 沮丧", DRAG_LIMIT)
-                        self.play(GRUMPY_REACTION)
+                        reaction = random.choice(GRUMPY_REACTIONS)
+                        logging.info("moved around %d times -> %s", DRAG_LIMIT, reaction[0])
+                        self.play(reaction)
                     else:
                         self.queue = []
                         self.walking = False
@@ -771,6 +792,7 @@ class Pet:
 
     def _show_menu(self, hwnd) -> None:
         menu = self._build_menu()
+        self.last_touch_at = time.perf_counter()      # 开右键菜单也算"互动"
         pt = POINT()
         u32.GetCursorPos(ctypes.byref(pt))
         u32.SetForegroundWindow(hwnd)
@@ -1043,6 +1065,9 @@ class Pet:
     def _next_step(self) -> None:
         if not self.queue:
             if self.phase == "interact":
+                # 一套动作（含"打哈欠 -> 打瞌睡"整段）播完 = 一轮结束，从这里重新开始计时
+                self.last_touch_at = time.perf_counter()
+                self.waking = False
                 self.set_mode("idle")
                 self.phase = "pause"
                 self.phase_until = time.perf_counter() + 0.8
@@ -1057,6 +1082,21 @@ class Pet:
         """The cursor is on her, or she was just handled: restart hover detection."""
         self.hover_started = None
         self.petted_recently = True
+        self.last_touch_at = time.perf_counter()
+
+    def _wake_up(self, now: float) -> None:
+        """Touched while dozing off: hold the startled frame, then go back to normal."""
+        self.queue = []
+        self.waking = True
+        self.set_mode("doze")
+        self.frame_i = len(self.durations["doze"]) - 1     # 最后一帧＝睁大眼睛的"惊醒"
+        self.frame_at = now
+        self.walking = False
+        self.target_x = None
+        self.step_until = now + WAKE_HOLD
+        self.phase = "interact"
+        self._touch()
+        logging.info("touched while asleep -> 惊醒")
 
     def feed(self) -> None:
         logging.info("menu 投喂 -> 吃饭")
@@ -1084,6 +1124,9 @@ class Pet:
         u32.GetCursorPos(ctypes.byref(pt))
         on_her = self._on_her(pt)
         if on_her and not self.dragging and not self.flying:
+            self.last_touch_at = now                  # 鼠标压在她身上就算"互动"
+            if self.mode in ("yawn", "doze") and not self.waking:
+                self._wake_up(now)                    # 睡梦中被碰到 -> 立刻惊醒
             if self.hover_started is None:
                 self.hover_started = now
                 logging.info("cursor ON her at (%d,%d); window x=%.0f y=%.0f w=%d h=%d",
@@ -1096,6 +1139,15 @@ class Pet:
         else:
             self.hover_started = None
             self.petted_recently = False
+
+        # 好久没人理她：先打个哈欠，接着打瞌睡（合计约 2 分钟），醒来回到日常并重新计时
+        if (not self.dragging and not self.flying and not self.paused
+                and self.phase == "rest" and not self.queue
+                and now - self.last_touch_at > SLEEP_AFTER):
+            logging.info("no interaction for %.0fs -> 打哈欠 -> 打瞌睡 (约 2 分钟)",
+                         now - self.last_touch_at)
+            self.last_touch_at = now
+            self.play(["yawn", "doze"])
 
         if self.dragging:
             self._follow_cursor(dt, now)
