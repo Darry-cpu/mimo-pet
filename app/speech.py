@@ -37,18 +37,19 @@ SWP_NOACTIVATE, SWP_NOSIZE, SWP_SHOWWINDOW = 0x0010, 0x0001, 0x0040
 ULW_ALPHA, AC_SRC_OVER, AC_SRC_ALPHA = 0x00000002, 0, 1
 SPI_GETWORKAREA = 0x0030
 
-FONT_CANDIDATES = (r"C:\Windows\Fonts\msyh.ttc",      # 微软雅黑
-                   r"C:\Windows\Fonts\msyhbd.ttc",
-                   r"C:\Windows\Fonts\simhei.ttf")     # 黑体
+FONT_CANDIDATES = (r"C:\Windows\Fonts\msyhbd.ttc",   # 微软雅黑 Bold（优先，字更清楚）
+                   r"C:\Windows\Fonts\msyh.ttc",     # 微软雅黑
+                   r"C:\Windows\Fonts\simhei.ttf")   # 黑体
 
 # --- 气泡素材的几何（占整图比例），由 pet-run 的处理脚本算出来 ---
 BUBBLE_NAME = "speech-bubble.png"
 SAFE_RECT = (0.1963, 0.1621, 0.8492, 0.5488)   # 文字安全区（云朵内的最大矩形）
 TIP_FRAC = (0.8709, 0.9116)                    # 最小圆点中心：气泡"指向"她的位置
 WIDTH_FACTOR = 0.85                            # 气泡宽度 = 桌宠宽度的 0.85 倍
-FONT_PT = 13                                   # 逻辑像素；塞不下会自动往小缩
-BOTTOM_FRAC = TIP_FRAC[1]                      # 圆点中心以下的余量（投影/圆点下缘）
-GAP = 8                                        # 气泡底边与她头顶之间留多少像素
+GAP = 6                                        # 小圆点离她头顶留多少像素
+# 她在自己的窗口里的位置（素材里人是居中站着的，格子顶上还有 4 行留白）
+HEAD_X_FRAC = 0.495
+HEAD_TOP_FRAC = 4.0 / 208.0
 INK = (32, 32, 32, 255)
 
 _art_cache: Image.Image | None = None
@@ -198,8 +199,14 @@ class SpeechBubble:
         self.w = 0
         self.h = 0
         self.pos = (0, 0)
-        self.tip = (0, 0)
         self.tip_offset = (0, 0)
+        self.mirror = False
+        self.mode = ""               # 上次用的摆放方式（above / aboveR / sideL / sideR / clamp）
+        self.mode_x = 0.0            # 选它时她的 x，用于防抖
+        self.mode_y = 0.0            # 选它时她的 y，同上（上下拖动时也要能重选）
+        self.text = ""
+        self.pet_w = 288
+        self.pet_h = 312
         self.until = 0.0
         self.on_click = None                   # callable() -> None
 
@@ -271,18 +278,27 @@ class SpeechBubble:
         self.w = self.h = 0
 
     # ----------------------------------------------------------------- image
-    def _render(self, text: str, pet_w: int) -> tuple[Image.Image, tuple[int, int]]:
-        """把文字排进云朵的安全区里；返回成品图和"小圆点"在图中的位置。"""
+    def _render(self, text: str, pet_w: int, mirror: bool = False) -> tuple[Image.Image, tuple[int, int]]:
+        """把文字排进云朵的安全区里；返回成品图和"小圆点"在图中的位置。
+
+        mirror=True 时把云朵左右翻转（小圆点跑到左下角），用于气泡放在她右边的情况。
+        """
         art = _art()
         target_w = max(120, int(round(pet_w * WIDTH_FACTOR)))
         img = art.resize((target_w, max(1, round(art.height * target_w / art.width))), Image.LANCZOS)
+        if mirror:
+            img = img.transpose(Image.FLIP_LEFT_RIGHT)
         w, h = img.size
-        bx0, by0 = int(SAFE_RECT[0] * w), int(SAFE_RECT[1] * h)
-        bx1, by1 = int(SAFE_RECT[2] * w), int(SAFE_RECT[3] * h)
+
+        lo, hi = SAFE_RECT[0], SAFE_RECT[2]
+        if mirror:                                    # 翻转后安全区也跟着左右对调
+            lo, hi = 1.0 - hi, 1.0 - lo
+        bx0, by0 = int(lo * w), int(SAFE_RECT[1] * h)
+        bx1, by1 = int(hi * w), int(SAFE_RECT[3] * h)
         box_w, box_h = max(10, bx1 - bx0), max(10, by1 - by0)
 
         probe = ImageDraw.Draw(Image.new("RGBA", (8, 8)))
-        base = max(8, int(round(w * 0.056)))                  # 字号跟气泡尺寸联动
+        base = max(8, int(round(w * 0.075)))                  # 字号跟气泡尺寸联动（字要大一点）
         font, lines, line_h = _font(base), [], 0
         for size in range(base, 6, -1):                       # 塞不下就逐级缩小字号
             font = _font(size)
@@ -299,29 +315,81 @@ class SpeechBubble:
             dr.text((x, y), ln, font=font, fill=INK)
             y += line_h
 
-        return img, (int(TIP_FRAC[0] * w), int(TIP_FRAC[1] * h))
+        tip_x = int((1.0 - TIP_FRAC[0] if mirror else TIP_FRAC[0]) * w)
+        return img, (tip_x, int(TIP_FRAC[1] * h))
 
     # ------------------------------------------------------------------- api
-    def _tip_for(self, pet_x: float, pet_y: float, pet_w: int) -> tuple[int, int]:
-        """把圆点中心放在她头顶正上方，让整个气泡（含圆点和投影）都在她上面，
-        这样气泡和她不会互相遮盖。"""
-        bottom_extra = (1.0 - BOTTOM_FRAC) * self.h          # 圆点中心往下的部分
-        return (int(pet_x + pet_w * 0.42), int(pet_y - bottom_extra - GAP))
+    def _placement(self, pet_x: float, pet_y: float, pet_w: int, pet_h: int):
+        """气泡放哪里。**以小圆点为准**：圆点落在她头上，云朵朝还有地方的那边伸。
+
+        （老 bug：这串小圆点在图片最下沿、云朵在左上方，以前把"图片左上角"当成圆点，
+        整块气泡于是往下错了一整个气泡的高度，云朵直接压在她头上、圆点指着她的腰。）
+        返回 (窗口x, 窗口y, 是否镜像)。"""
+        left, top, right, bottom = _work_area()
+        ox, oy = self.tip_offset                       # 小圆点在图片里的位置
+        mox = self.w - ox                              # 镜像之后小圆点的位置
+        head_x = pet_x + pet_w * HEAD_X_FRAC           # 她的头在屏幕上的横坐标
+        head_y = pet_y + pet_h * HEAD_TOP_FRAC         # 她的头顶
+        y_above = int(head_y - GAP - self.h)           # 整个气泡（含圆点）都在头顶上方
+        # 她贴着屏幕顶、上面放不下时：云朵整块挪到她旁边（圆点落在她肩膀那儿），不压她
+        y_side = head_y + pet_h * 0.22 - oy
+        y_side = int(min(max(y_side, top + 4), bottom - self.h - 4))
+
+        def fits(x: int, y: int) -> bool:
+            return (left + 4 <= x and x + self.w <= right - 4
+                    and top + 4 <= y and y + self.h <= bottom - 4)
+
+        cands = (
+            ("above",  int(head_x - ox),  y_above, False),          # 云朵在她左上（经典）
+            ("aboveR", int(head_x - mox), y_above, True),           # 左边没地方：云朵伸到她右上
+            ("sideL",  int(pet_x - self.w - GAP), y_side, False),   # 云朵贴她左边，圆点朝她
+            ("sideR",  int(pet_x + pet_w + GAP), y_side, True),     # 云朵贴她右边（镜像，圆点朝她）
+        )
+        # 防抖：沿用上次的摆法，只有它放不下、或她挪动超过 24 像素时才重选
+        if self.mode:
+            for name, x, y, m in cands:
+                if (name == self.mode and fits(x, y)
+                        and abs(pet_x - self.mode_x) < 24 and abs(pet_y - self.mode_y) < 24):
+                    self.mode_x, self.mode_y = pet_x, pet_y
+                    return x, y, m
+        for name, x, y, m in cands:
+            if fits(x, y):
+                self.mode, self.mode_x, self.mode_y = name, pet_x, pet_y
+                return x, y, m
+        # 实在没地方（屏幕小又贴顶）：圆点仍尽量对着她的头，位置夹回屏幕里
+        self.mode, self.mode_x, self.mode_y = "clamp", pet_x, pet_y
+        m = self.mirror
+        x = int(head_x - (mox if m else ox))
+        y = y_above if y_above >= top + 4 else y_side
+        return (max(left + 4, min(x, right - self.w - 4)),
+                min(max(y, top + 4), bottom - self.h - 4), m)
+
+    def linger(self, seconds: float) -> None:
+        """动作演完时调用：气泡最多再留 seconds 秒就收（0 = 跟动作同时收）。"""
+        if self.hwnd and self.until:
+            self.until = min(self.until, _now() + seconds)
 
     def show(self, text: str, pet_x: float, pet_y: float, pet_w: int, pet_h: int = 0,
              seconds: float = 10.0, now: float | None = None) -> None:
-        """Show `text` above the pet box (pet_x, pet_y, pet_w, pet_h)."""
+        """Show `text` next to the pet box (pet_x, pet_y, pet_w, pet_h)."""
         try:
             if self.hwnd is None:
                 self._create()
-            img, offset = self._render(text, pet_w)
+            self.text, self.pet_w, self.pet_h = text, pet_w, pet_h
+            img, offset = self._render(text, pet_w, False)
             self.tip_offset = offset
-            w, h = img.size
-            self._ensure_dib(w, h)
-            ctypes.memmove(self._bits, premultiplied_bgra(img), w * h * 4)
-            self.tip = self._tip_for(pet_x, pet_y, pet_w)
+            self._ensure_dib(*img.size)
+            x, y, mirror = self._placement(pet_x, pet_y, pet_w, pet_h)
+            if mirror:                                    # 要放到右边，得镜像重渲染
+                img, offset = self._render(text, pet_w, True)
+                self.tip_offset = offset
+                self._ensure_dib(*img.size)
+                x, y, _ = self._placement(pet_x, pet_y, pet_w, pet_h)
+            self.mirror = mirror
+            ctypes.memmove(self._bits, premultiplied_bgra(img), self.w * self.h * 4)
+            self.pos = (x, y)
             self.until = (now if now is not None else _now()) + seconds
-            self._place()
+            self._move_and_paint()
             u32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
             self._paint()
         except Exception:                                              # noqa: BLE001
@@ -334,11 +402,18 @@ class SpeechBubble:
         if now >= self.until:
             self.hide()
             return
-        tip = self._tip_for(pet_x, pet_y, pet_w)
-        if tip != self.tip:
-            self.tip = tip
-            self._place()
-            self._paint()
+        x, y, mirror = self._placement(pet_x, pet_y, pet_w, pet_h)
+        if (x, y, mirror) == (self.pos[0], self.pos[1], self.mirror):
+            return
+        if mirror != self.mirror:                         # 换边了：要重新渲染（镜像）
+            img, offset = self._render(self.text, pet_w, mirror)
+            self.tip_offset = offset
+            self._ensure_dib(*img.size)
+            ctypes.memmove(self._bits, premultiplied_bgra(img), self.w * self.h * 4)
+            self.mirror = mirror
+            x, y, _ = self._placement(pet_x, pet_y, pet_w, pet_h)
+        self.pos = (x, y)
+        self._move_and_paint()
 
     def hide(self) -> None:
         if self.hwnd:
@@ -356,15 +431,8 @@ class SpeechBubble:
         self._free_dib()
 
     # --------------------------------------------------------------- placing
-    def _place(self) -> None:
-        left, top, right, bottom = _work_area()
-        ox, oy = self.tip_offset
-        x = self.tip[0] - ox
-        y = self.tip[1] - oy
-        x = max(left + 4, min(x, right - self.w - 4))
-        y = max(top + 4, min(y, bottom - self.h - 4))
-        self.pos = (x, y)
-        u32.SetWindowPos(self.hwnd, HWND_TOPMOST, x, y, self.w, self.h,
+    def _move_and_paint(self) -> None:
+        u32.SetWindowPos(self.hwnd, HWND_TOPMOST, self.pos[0], self.pos[1], self.w, self.h,
                          SWP_NOACTIVATE | SWP_SHOWWINDOW)
 
     def _paint(self) -> None:
