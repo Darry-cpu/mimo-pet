@@ -67,6 +67,8 @@ EXTRA_STATES = {
     "doze":  (6, 6, [200, 18372, 18372, 18372, 18372, 300]),
     # 惊恐（余额预警专用）：每帧 6000ms ×1.6 ≈ 9.6s，整段约 60s，和提醒气泡同步
     "panic": (7, 6, [6000] * 5 + [7500]),
+    # 告别（点菜单"退出"时先播它，播完才退）：5 帧，整段约 4.8s
+    "farewell": (8, 5, [500, 500, 600, 500, 900]),
 }
 ALL_STATES = {**STATES, **EXTRA_STATES}
 # 休息时段轮流出现的动作（以前只有玩手机 / 干活中）
@@ -143,6 +145,7 @@ DRAG_WINDOW = 30.0          # seconds - window used to count "shoved around a lo
 DRAG_LIMIT = 3              # drags within the window before she gets grumpy
 HOVER_PET_SECONDS = 1.2     # cursor resting on her this long = 打招呼
 SLEEP_AFTER = 300.0         # s - 这么久没人碰她 -> 打哈欠 -> 打瞌睡（合计约 2 分钟）
+FADE_SECONDS = 0.7          # s - 告别动画播完后淡出消失用多久
 WAKE_HOLD = 0.45            # s - 睡梦中被碰到后，停在她"惊醒"那一帧多久
 CLICK_DELAY = 0.28          # wait this long to be sure a lone click is not a double click
 
@@ -381,7 +384,7 @@ def _sheet(path: Path | None = None) -> Image.Image:
     img = _sheet_cache.get(path)
     if img is None:
         img = Image.open(path).convert("RGBA")
-        expected = ((8 * CELL_W, 8 * CELL_H) if path == SHEET2
+        expected = ((8 * CELL_W, 9 * CELL_H) if path == SHEET2
                     else (8 * CELL_W, 9 * CELL_H))
         if img.size != expected:
             logging.warning("unexpected atlas size %s (expected %s) in %s",
@@ -484,6 +487,8 @@ class Pet:
         # 上次"有人碰她"的时刻：碰/点/拖/右键菜单都算，超过 SLEEP_AFTER 就去睡
         self.last_touch_at = time.perf_counter()
         self.waking = False          # 已经在"惊醒"这一刻里了，别每帧重复触发
+        self.quit_after = False      # 告别动画播完就退出
+        self.fade_start = 0.0        # 告别后淡出的起点（0 = 没在淡出）
         # --- 余额预警（邮件通道）---
         self.bubble = None           # 气泡窗口，run() 里建
         self.alert_cfg = None
@@ -839,7 +844,10 @@ class Pet:
                 logging.info("menu 动作 -> 走一段")
                 self.start_travel()
         elif cmd == 4:
-            u32.PostQuitMessage(0)
+            # 退出：先跟她好好告个别，播完再退
+            logging.info("退出：先播告别动画")
+            self.play(["farewell"])
+            self.quit_after = True
         elif cmd == 5:
             self.feed()
         elif cmd == 6:
@@ -1075,6 +1083,10 @@ class Pet:
     def play(self, steps: list[str]) -> None:
         """A user-triggered reaction; when it finishes she goes back to resting."""
         self.queue = list(steps)
+        self.quit_after = False        # 有别的新动作＝这次不退了
+        if self.fade_start:            # 正在淡出的话，撤销淡出、恢复不透明
+            self.fade_start = 0.0
+            self.blend.SourceConstantAlpha = 255
         self.walking = False
         self.target_x = None
         self.step_until = 0.0
@@ -1088,6 +1100,11 @@ class Pet:
                 # 一套动作（含"打哈欠 -> 打瞌睡"整段）播完 = 一轮结束，从这里重新开始计时
                 self.last_touch_at = time.perf_counter()
                 self.waking = False
+                if self.quit_after:
+                    self.quit_after = False
+                    logging.info("告别完了 -> 淡出并退出")
+                    self.fade_start = time.perf_counter()
+                    return
                 self.set_mode("idle")
                 self.phase = "pause"
                 self.phase_until = time.perf_counter() + 0.8
@@ -1130,6 +1147,15 @@ class Pet:
 
     def step(self, dt: float) -> None:
         now = time.perf_counter()
+        if self.fade_start:                       # 告别之后淡出消失，然后退出
+            frac = (now - self.fade_start) / FADE_SECONDS
+            if frac >= 1.0:
+                logging.info("已淡出 -> 退出")
+                u32.PostQuitMessage(0)
+                return
+            self.blend.SourceConstantAlpha = max(1, int(round(255 * (1.0 - frac))))
+            self._blit(self.frames[self.mode][-1])      # 定格最后一帧，逐渐消失
+            return
         self._watch_topmost(now)
         self._step_knock(dt)
         self._pump_alert(now)
