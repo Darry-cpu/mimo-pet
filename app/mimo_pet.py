@@ -34,11 +34,16 @@ from PIL import Image
 import alert                    # 余额预警：只读检查邮箱里小米发来的提醒邮件
 import mouse                    # 罗技鼠标电量（HID++ 只读查询）
 import speech                   # 气泡窗口：她唯一能显示文字的地方
+import update_check             # 检查有没有新版本（只读问 GitHub）
 
 # ---------------------------------------------------------------- configuration
 CELL_W, CELL_H = 192, 208
 DEFAULT_SCALE = 1.0
 SCALES = [0.75, 1.0, 1.25, 1.5]
+
+# 程序版本号。build_exe.py 会把它和 mimo_setup.iss 里的 AppVersion 对一遍，
+# 不一致就直接编译失败 —— 防止再出现"源码改了、你装上的还是旧 exe"。
+APP_VERSION = "1.1.22"
 
 # frame counts and per-frame durations, matching references/animation-rows.md
 STATES = {
@@ -137,6 +142,7 @@ CMD_ACTION = 100
 # 右键"余额预警"子菜单：+0 打开配置文件 / +1 测试连接 / +2 试一下提醒
 CMD_ALERT = 200
 CMD_MOUSE = 210             # 右键"看鼠标电量"
+CMD_UPDATE = 220            # 右键"检查更新"
 ACTION_MENU = ["idle", "waving", "jumping", "failed", "waiting", "running", "review",
               "daze", "shake", "music", "shy", "angry", "yawn", "doze"]
 STATE_LABELS = {
@@ -502,6 +508,7 @@ class Pet:
         # 上次"有人碰她"的时刻：碰/点/拖/右键菜单都算，超过 SLEEP_AFTER 就去睡
         self.last_touch_at = time.perf_counter()
         self.waking = False          # 已经在"惊醒"这一刻里了，别每帧重复触发
+        self.alert_pose_active = False   # 正在演提醒动作（惊恐/低电量/看电量），拖拽要连气泡一起收
         self.quit_after = False      # 告别动画播完就退出
         self.fade_start = 0.0        # 告别后淡出的起点（0 = 没在淡出）
         self.mouse_low_alerted = False   # 鼠标低电量本轮是否已经提醒过
@@ -509,7 +516,9 @@ class Pet:
         self.bubble = None           # 气泡窗口，run() 里建
         self.alert_cfg = None
         self.watcher = None
-        self.pending_alert: tuple[str, str | None, float] | None = None   # (文字, 动作, 气泡挂多久)
+        self.pending_alert: tuple[str, str | None, float, str | None] | None = None
+        # ↑ (文字, 动作, 气泡挂多久, 点气泡打开的网址)
+        self.bubble_link: str | None = None      # 现在这个气泡点开去哪（None = 用 alert.ini 里的）
         # --- drag / throw physics ---
         self.drag_target: tuple[float, float] | None = None
         self._drag_track: list[tuple[float, float, float]] = []
@@ -669,6 +678,7 @@ class Pet:
                                             or abs(pt.y - self.press_pt[1]) > 4):
                     self.drag_moved = True
                     self.pending_dblclick = False      # she is being dragged, not tapped
+                    self._interrupt_alert_pose("drag")
                     self.queue = []
                     self.walking = False
                     self.target_x = None
@@ -709,10 +719,12 @@ class Pet:
                     logging.info("drag #%d within %.0fs", len(self.drag_times), DRAG_WINDOW)
                     if len(self.drag_times) >= DRAG_LIMIT:
                         self.drag_times.clear()
+                        self._interrupt_alert_pose("throw")   # 甩飞打断提醒动作，气泡一起收
                         reaction = random.choice(GRUMPY_REACTIONS)
                         logging.info("moved around %d times -> %s", DRAG_LIMIT, reaction[0])
                         self.play(reaction)
                     else:
+                        self._interrupt_alert_pose("drop")
                         self.queue = []
                         self.walking = False
                         self.target_x = None
@@ -827,6 +839,7 @@ class Pet:
         u32.AppendMenuW(menu, MF_POPUP, asub, "余额预警")
         u32.AppendMenuW(menu, 0x800, 0, None)
         u32.AppendMenuW(menu, 0, CMD_MOUSE, "看鼠标电量")
+        u32.AppendMenuW(menu, 0, CMD_UPDATE, "检查更新")
         u32.AppendMenuW(menu, 0x800, 0, None)
         u32.AppendMenuW(menu, 0, 4, "退出")
         return menu
@@ -851,6 +864,8 @@ class Pet:
             self._rescale(SCALES[i])
         elif cmd == CMD_MOUSE:
             self._on_mouse_command()
+        elif cmd == CMD_UPDATE:
+            self._on_update_command()
         elif cmd >= CMD_ALERT:
             self._on_alert_command(cmd - CMD_ALERT)
         elif cmd >= CMD_ACTION:
@@ -1124,6 +1139,8 @@ class Pet:
                 # 一套动作（含"打哈欠 -> 打瞌睡"整段）播完 = 一轮结束，从这里重新开始计时
                 self.last_touch_at = time.perf_counter()
                 self.waking = False
+                if self.alert_pose_active:   # 提醒动作演完 = 一轮结束，清标记
+                    self.alert_pose_active = False
                 if self.bubble is not None:      # 提醒的气泡跟动作同时收（别让气泡比动作活得久）
                     self.bubble.linger(ALERT_LINGER)
                 if self.quit_after:
@@ -1146,6 +1163,18 @@ class Pet:
         self.hover_started = None
         self.petted_recently = True
         self.last_touch_at = time.perf_counter()
+
+    def _interrupt_alert_pose(self, reason: str) -> None:
+        """正在演提醒动作时被人打断（拖拽/甩飞）：气泡立刻收走。
+
+        气泡本来和动作同时结束（ALERT_LINGER=0）；动作被掐断后，`_next_step` 不会
+        被调用（`step_until` 还没到），气泡就会自己挂到超时——用户看到的就是"人换
+        动作了，气泡还留着"。所以打断时直接 `hide()`。"""
+        if self.alert_pose_active:
+            if self.bubble is not None:
+                self.bubble.hide()
+            logging.info("提醒动作被打断（%s）-> 气泡收走", reason)
+        self.alert_pose_active = False
 
     def _wake_up(self, now: float) -> None:
         """Touched while dozing off: hold the startled frame, then go back to normal."""
@@ -1295,6 +1324,10 @@ class Pet:
             threading.Thread(target=self._mouse_loop, daemon=True).start()
         except Exception:                                              # noqa: BLE001
             logging.warning("鼠标电量监控起不来", exc_info=True)
+        try:
+            threading.Thread(target=self._update_loop, daemon=True).start()
+        except Exception:                                              # noqa: BLE001
+            logging.warning("更新检查起不来", exc_info=True)
 
     # ------------------------------------------------- 鼠标电量（罗技）
     def _mouse_loop(self) -> None:
@@ -1307,7 +1340,8 @@ class Pet:
                     if pct < MOUSE_LOW_PERCENT and not self.mouse_low_alerted:
                         self.mouse_low_alerted = True
                         logging.info("鼠标电量低：%d%%（%s）", pct, info["status"])
-                        self.pending_alert = (MOUSE_ALERT_TEXT.format(pct=pct), MOUSE_LOW_POSE, 12.0)
+                        self.pending_alert = (MOUSE_ALERT_TEXT.format(pct=pct), MOUSE_LOW_POSE,
+                                              12.0, None)
                     elif pct >= MOUSE_LOW_PERCENT + 5:      # 留点余量，免得在阈值上下反复提醒
                         if self.mouse_low_alerted:
                             logging.info("鼠标电量回到 %d%%，提醒状态复位", pct)
@@ -1320,30 +1354,32 @@ class Pet:
     def _on_mouse_command(self) -> None:
         """右键「看鼠标电量」：当场读一次，结果用气泡告诉她。"""
         self._touch()
-        self.pending_alert = ("正在读鼠标电量…", None, 12.0)
+        self.pending_alert = ("正在读鼠标电量…", None, 12.0, None)
 
         def work() -> None:
             info = mouse.read_battery() or mouse.read_battery(refresh=True)
             if info:
                 self.pending_alert = ("鼠标还有 %d%%（%s）" % (info["percent"], info["status"]),
-                                      MOUSE_CHECK_POSE, 12.0)
+                                      MOUSE_CHECK_POSE, 12.0, None)
             else:
                 self.pending_alert = ("读不到鼠标电量：它可能睡着了，动一下鼠标再试",
-                                      MOUSE_CHECK_POSE, 12.0)
+                                      MOUSE_CHECK_POSE, 12.0, None)
 
         threading.Thread(target=work, daemon=True).start()
 
     def _pump_alert(self, now: float) -> None:
         """Show a pending reminder and keep the bubble glued to her."""
         if self.pending_alert is not None:
-            text, pose, seconds = self.pending_alert
+            text, pose, seconds, link = self.pending_alert
             self.pending_alert = None
             logging.info("提醒: %s", text)
             if self.bubble is not None:
-                self.bubble.on_click = self._open_alert_page
+                self.bubble_link = link
+                self.bubble.on_click = self._open_bubble_page
                 self.bubble.show(text, self.x, self.y, self.w, self.h,
                                  seconds=seconds, now=now)
             if pose:
+                self.alert_pose_active = True
                 self.play([pose])
         if self.bubble is not None:
             try:
@@ -1353,14 +1389,15 @@ class Pet:
 
     def _on_email_alert(self, text: str) -> None:
         """Called from the watcher thread — just leaves a note for the UI loop."""
-        self.pending_alert = (text, self._alert_pose(), 20.0)   # 上限 20 秒；动作演完会提前收
+        self.pending_alert = (text, self._alert_pose(), 20.0, None)   # 上限 20 秒；动作演完会提前收
 
     def _alert_pose(self) -> str | None:
         pose = (getattr(self.alert_cfg, "pose", "") or "panic").strip()
         return pose if pose in ALL_STATES else "panic"
 
-    def _open_alert_page(self) -> None:
-        page = (getattr(self.alert_cfg, "page", "") or "").strip() \
+    def _open_bubble_page(self) -> None:
+        """点气泡：新版本提醒去下载页，其余（余额预警）去账单页。"""
+        page = self.bubble_link or (getattr(self.alert_cfg, "page", "") or "").strip() \
             or "https://platform.xiaomimimo.com/"
         try:
             os.startfile(page)                                          # noqa: S606
@@ -1376,14 +1413,44 @@ class Pet:
             except Exception:                                           # noqa: BLE001
                 logging.warning("打不开配置文件", exc_info=True)
         elif k == 1:
-            self.pending_alert = ("正在连邮箱看看…", None, 12.0)
+            self.pending_alert = ("正在连邮箱看看…", None, 12.0, None)
 
             def work() -> None:
-                self.pending_alert = (alert.test_connection(alert.load_config()), None, 12.0)
+                self.pending_alert = (alert.test_connection(alert.load_config()), None, 12.0, None)
 
             threading.Thread(target=work, daemon=True).start()
         elif k == 2:
-            self.pending_alert = (alert.ALERT_TEXT, self._alert_pose(), 20.0)
+            self.pending_alert = (alert.ALERT_TEXT, self._alert_pose(), 20.0, None)
+
+    # ------------------------------------------------- 检查更新（只读问 GitHub）
+    def _update_loop(self) -> None:
+        """启动一会儿之后静默查一次；一天最多真查一次。查不到就安静等着。"""
+        time.sleep(10.0)
+        self._check_update(manual=False)
+
+    def _on_update_command(self) -> None:
+        """右键「检查更新」：马上问一次 GitHub，结果用气泡告诉她。"""
+        self._touch()
+        self.pending_alert = ("正在看有没有新版本…", None, 12.0, None)
+        threading.Thread(target=self._check_update, args=(True,), daemon=True).start()
+
+    def _check_update(self, manual: bool) -> None:
+        """查更新。网络请求最长等 8 秒，所以放后台线程，绝不卡住她。"""
+        try:
+            status, version, url = update_check.check(APP_VERSION, force=manual)
+        except Exception:                                              # noqa: BLE001
+            logging.warning("查更新出错", exc_info=True)
+            status, version, url = update_check.ERROR, APP_VERSION, update_check.FALLBACK_URL
+
+        if status == update_check.NEWER:
+            logging.info("发现新版本 %s（当前 %s）：%s", version, APP_VERSION, url)
+            self.pending_alert = ("发现新版本 %s，点我去看看～" % version, None, 20.0, url)
+        elif manual and status == update_check.CURRENT:
+            logging.info("已经是最新版本 %s", APP_VERSION)
+            self.pending_alert = ("已经是最新版本（%s）" % APP_VERSION, None, 8.0, None)
+        elif manual:
+            logging.info("查更新没成功（网络不通或 GitHub 没响应）")
+            self.pending_alert = ("连不上 GitHub，过一会儿再试试", None, 8.0, None)
 
     def run(self) -> None:
         # render the other zoom levels in the background right away
