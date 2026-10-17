@@ -5,7 +5,7 @@
 ; ---------------------------------------------------------------
 
 #define AppName "Mimo 桌宠"
-#define AppVersion "1.1.20"
+#define AppVersion "1.1.21"
 #define AppExe "MimoPet.exe"
 #define AppId "8E4C1D22-9A3B-4F6E-8C71-2B5D7A0F1E33"
 
